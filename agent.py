@@ -45,35 +45,55 @@ if 'General' in config:
     LICENSE_KEY_DEFAULT = config['General'].get('license_key', LICENSE_KEY_DEFAULT)
     DEV_MODE = config['General'].getboolean('dev_mode', False)
 
+# ... imports ...
+
+
 # 2. Parse Arguments (Overrides Config)
-parser = argparse.ArgumentParser(description='Cloud Print Agent')
-parser.add_argument('--api', default=API_DEFAULT, help='Cloud API URL')
-parser.add_argument('--server-id', default=SERVER_ID_DEFAULT, help='Unique Server ID')
-parser.add_argument('--license-key', default=LICENSE_KEY_DEFAULT, help='SaaS License Key')
-parser.add_argument('--dev', action='store_true', help='Enable Dev Mode (Simulated Printer)')
+# function to parse args safely without exiting
+def parse_args_safe():
+    parser = argparse.ArgumentParser(description='Cloud Print Agent')
+    parser.add_argument('--api', default=API_DEFAULT, help='Cloud API URL')
+    parser.add_argument('--server-id', default=SERVER_ID_DEFAULT, help='Unique Server ID')
+    parser.add_argument('--license-key', default=LICENSE_KEY_DEFAULT, help='SaaS License Key')
+    parser.add_argument('--dev', action='store_true', help='Enable Dev Mode (Simulated Printer)')
+    
+    # In GUI mode, sys.argv might have weird stuff or nothing. 
+    # If called from bootloader/noconsole, standard parsing is fine.
+    try:
+        args, unknown = parser.parse_known_args()
+        return args
+    except:
+        return argparse.Namespace(api=API_DEFAULT, server_id=SERVER_ID_DEFAULT, license_key=LICENSE_KEY_DEFAULT, dev=False)
 
-try:
-    args = parser.parse_args()
-except SystemExit:
-    # If argparse fails (e.g. help), it exits. We catch to keep window open if needed, 
-    # but usually help is fine.
-    raise
+# Global variables will be set in run()
+API = API_DEFAULT
+LICENSE_KEY = LICENSE_KEY_DEFAULT
+SERVER_ID = SERVER_ID_DEFAULT
+HEADERS = {}
+STARTUP_ERROR = None
 
+# Validation Logic moved to run()
+args = parse_args_safe()
 if args.dev:
     DEV_MODE = True
+if args.api:
+    API = args.api
+if args.server_id:
+    SERVER_ID = args.server_id # Temporary, will be finalized in run()
+if args.license_key:
+    LICENSE_KEY = args.license_key
 
-# 3. Final Validation
-if not args.license_key:
-    print("="*60)
-    print("ERROR: License Key is required.")
-    print(f"Please create a file named 'agent.ini' in: {application_path}")
-    print("Content:")
-    print("[General]")
-    print(f"api = {API_DEFAULT}")
-    print("license_key = YOUR_LICENSE_KEY_HERE")
-    print("="*60)
-    input("Press Enter to exit...") # Keep window open
-    sys.exit(1)
+def generate_server_id(license_key):
+    # ... existing logic ...
+    mac = uuid.getnode()
+    unique_str = f"{mac}-{license_key}"
+    return "server-" + hashlib.md5(unique_str.encode()).hexdigest()[:8]
+
+if not LICENSE_KEY:
+    STARTUP_ERROR = "License Key Missing. Checks agent.ini"
+else:
+    SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY)
+    HEADERS = {"X-License-Key": LICENSE_KEY, "X-Server-ID": SERVER_ID}
 
 
 
@@ -256,6 +276,12 @@ def create_image():
     return image
 
 def run_agent_loop(icon):
+    if STARTUP_ERROR:
+        print(f"Startup Error: {STARTUP_ERROR}")
+        icon.title = "Agent Error: Missing Config"
+        icon.notify(STARTUP_ERROR, "Configuration Error")
+        return
+
     print(f"Agent Loop Started. Server ID: {SERVER_ID}")
     
     # Initial Discovery
