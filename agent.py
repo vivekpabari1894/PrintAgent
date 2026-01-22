@@ -214,74 +214,137 @@ def print_pdf(content, printer_uid):
             except Exception as rm_err:
                 print(f"Warning: Failed to delete temp file {filename}: {rm_err}")
 
-# Main Execution
-if __name__ == '__main__':
+import threading
+from PIL import Image, ImageDraw
+import pystray
+import webbrowser
+
+# ... config ...
+
+# Redirect print to log file since we have no console
+class Logger(object):
+    def __init__(self):
+        self.terminal = sys.stdout
+        self.log = open("agent.log", "a", encoding='utf-8')
+
+    def write(self, message):
+        # self.terminal.write(message) # Uncomment if debugging with console
+        try:
+            self.log.write(message)
+            self.log.flush()
+        except:
+            pass
+
+    def flush(self):
+        #self.terminal.flush()
+        self.log.flush()
+
+# Apply logger if not in dev (console) mode, or just always for safety in GUI mode
+if not os.environ.get('AGENT_CONSOLE_DEBUG'):
+    sys.stdout = Logger()
+    sys.stderr = sys.stdout
+
+def create_image():
+    # Generate a simple icon programmatically (64x64 blue box with a P)
+    width = 64
+    height = 64
+    color1 = "blue"
+    color2 = "white"
+    image = Image.new('RGB', (width, height), color1)
+    dc = ImageDraw.Draw(image)
+    dc.rectangle((16, 16, 48, 48), fill=color2)
+    return image
+
+def run_agent_loop(icon):
+    print(f"Agent Loop Started. Server ID: {SERVER_ID}")
+    
+    # Initial Discovery
     try:
-        # Initial Discovery
         discovered_printers = get_printers()
         if DEV_MODE:
-                discovered_printers = [
-                    {
-                        "os_id": "DEV_PDF",
-                        "name": "Dev PDF Printer"
-                    }
-                ]
+            discovered_printers.append({"os_id": "DEV_PDF", "name": "Dev PDF Printer"})
+            
         if discovered_printers:
-            print(f"Discovered printers: {discovered_printers}")
+            print(f"Discovered: {len(discovered_printers)} printers.")
             try:
                 response = requests.post(f"{API}/api/agent/printers", json={"printers": discovered_printers, "server_uid": SERVER_ID}, headers=HEADERS)
                 if response.status_code in [401, 403]:
-                    try:
-                        err = response.json()
-                        print(f"Auth Error: {err.get('error', 'Unknown Error')}")
-                    except:
-                        print(f"Auth Error: {response.text}")
+                    print(f"AUTH ERROR during sync: {response.text}")
+                    icon.notify("Authentication Failed. Check agent.ini", "Cloud Print Error")
                 response.raise_for_status()
             except Exception as e:
-                print(f"Failed to sync printers: {e}")
+                print(f"Sync Failed: {e}")
+    except Exception as e:
+        print(f"Startup Failed: {e}")
 
-        while True:
-            try:
-                response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS)
-                
-                if response.status_code in [401, 403]:
-                     try:
-                        err = response.json()
-                        print(f"Auth Error: {err.get('error', 'Unknown Error')}")
-                     except:
-                        print(f"Auth Error: {response.text}")
-                     time.sleep(10) # Wait longer on auth error
-                     continue
-
-                response.raise_for_status()
-                job = response.json()
-                
-                if job:
-                    try:
-                        print_pdf(job["content"], job["printer_uid"])
-                        requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
-                    except Exception as e:
-                        print(f"Printing failed: {e}")
-                        requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
-            except Exception as e:
-                print(f"Error polling jobs: {e}")
-            time.sleep(5)
-
-    except Exception as fatal_error:
-        print("\n" + "!"*60)
-        print(f"FATAL ERROR: {fatal_error}")
-        print("!"*60)
-        # Log to file
+    # Main Loop
+    while True:
+        if not icon.visible:
+            break # Stop if icon hidden (exit)
+            
         try:
-            with open("agent_crash.log", "w") as log:
-                 log.write(str(fatal_error))
-                 import traceback
-                 traceback.print_exc(file=log)
-        except:
+            response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS)
+            
+            if response.status_code in [401, 403]:
+                 print("Auth Error polling jobs.")
+                 time.sleep(10)
+                 continue
+
+            response.raise_for_status()
+            job = response.json()
+            
+            if job:
+                print(f"Received Job: {job.get('job_id')}")
+                icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
+                try:
+                    print_pdf(job["content"], job["printer_uid"])
+                    requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
+                except Exception as e:
+                    print(f"Printing failed: {e}")
+                    requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
+        except Exception as e:
+            # print(f"Polling error: {e}") # Too spammy if offline
             pass
-        
-        import traceback
-        traceback.print_exc()
-        print("\nApplication has crashed.")
-        input("Press Enter to exit...")
-        sys.exit(1)
+            
+        time.sleep(5)
+
+def on_open_log(icon, item):
+    if os.path.exists("agent.log"):
+        os.startfile("agent.log")
+
+def on_open_config(icon, item):
+    if os.path.exists("agent.ini"):
+        os.startfile("agent.ini")
+    else:
+        # Create default
+        with open("agent.ini", "w") as f:
+            f.write(f"[General]\napi={API_DEFAULT}\nlicense_key=\n")
+        os.startfile("agent.ini")
+
+def on_exit(icon, item):
+    icon.visible = False
+    icon.stop()
+    sys.exit(0)
+
+# Main Execution
+if __name__ == '__main__':
+    # GUI Mode Main Entry
+    icon = pystray.Icon("CloudPrintAgent")
+    icon.menu = pystray.Menu(
+        pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
+        pystray.MenuItem("View Log", on_open_log),
+        pystray.MenuItem("Edit Config", on_open_config),
+        pystray.MenuItem("Exit", on_exit)
+    )
+    icon.icon = create_image()
+    icon.title = f"Cloud Print Agent ({SERVER_ID})"
+    
+    # Start Agent Thread
+    t = threading.Thread(target=run_agent_loop, args=(icon,), daemon=True)
+    t.start()
+    
+    # Run UI (Blocking)
+    try:
+        icon.run()
+    except KeyboardInterrupt:
+        pass

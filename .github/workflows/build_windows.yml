@@ -14,12 +14,12 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller requests
+        pip install pyinstaller requests pystray Pillow
     - name: Download SumatraPDF
       run: |
         Invoke-WebRequest -Uri "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" -OutFile "SumatraPDF.exe"
     - name: Build EXE with Bundled SumatraPDF
-      run: pyinstaller --onefile --name "CloudPrintAgent" --add-binary "SumatraPDF.exe;." agent.py
+      run: pyinstaller --noconsole --onefile --name "CloudPrintAgent" --add-binary "SumatraPDF.exe;." agent.py
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
