@@ -326,8 +326,10 @@ def on_exit(icon, item):
     icon.stop()
     sys.exit(0)
 
-# Main Execution
-if __name__ == '__main__':
+# ... (previous code) ...
+
+# Main Execution wrapper for Cython
+def run():
     # GUI Mode Main Entry
     icon = pystray.Icon("CloudPrintAgent")
     icon.menu = pystray.Menu(
@@ -348,3 +350,6 @@ if __name__ == '__main__':
         icon.run()
     except KeyboardInterrupt:
         pass
+
+if __name__ == '__main__':
+    run()
