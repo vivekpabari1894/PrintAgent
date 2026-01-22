@@ -143,9 +143,40 @@ def print_pdf(content, printer_uid):
             abs_path = os.path.abspath(filename)
             printer_name_escaped = printer_uid.replace('"', '`"')
             
+            # 1. OPTION A: SumatraPDF (Recommended & Bundled)
+            # Check for bundled SumatraPDF in PyInstaller temp folder (_MEIPASS)
+            sumatra_path = None
+            
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                # Bundled in single-file EXE
+                bundled_path = os.path.join(sys._MEIPASS, 'SumatraPDF.exe')
+                if os.path.exists(bundled_path):
+                     sumatra_path = bundled_path
+            
+            # If not bundled, check local folder (for dev/testing)
+            if not sumatra_path:
+                if getattr(sys, 'frozen', False):
+                    app_dir = os.path.dirname(sys.executable)
+                else:
+                    app_dir = os.path.dirname(os.path.abspath(__file__))
+                local_path = os.path.join(app_dir, 'SumatraPDF.exe')
+                if os.path.exists(local_path):
+                    sumatra_path = local_path
+            
+            if sumatra_path and os.path.exists(sumatra_path):
+                print(f"Printing via SumatraPDF...")
+                # Sumatra command: SumatraPDF.exe -print-to "Printer Name" -exit-on-print "file.pdf"
+                # -silent prevents the window from showing up
+                cmd = [sumatra_path, '-print-to', printer_uid, '-exit-on-print', '-silent', abs_path]
+                subprocess.run(cmd, check=True)
+                print("Sent to printer via SumatraPDF.")
+                return # Success
+            
+            # 2. OPTION B: PowerShell (Fallback)
             # Using Powershell's Start-Process with 'PrintTo' verb. 
             # REQUIRES a PDF reader associated with .pdf files that supports the 'PrintTo' verb (e.g. Adobe Reader, Foxit).
-            # Modern browsers (Edge/Chrome) as default PDF viewers DO NOT support this verb.
+            
+            print("SumatraPDF.exe not found. Falling back to System Default PDF Viewer...")
             
             cmd = f'powershell -Command "Start-Process -FilePath \'{abs_path}\' -Verb PrintTo -ArgumentList \'{printer_name_escaped}\' -PassThru -Wait"'
             
@@ -156,10 +187,13 @@ def print_pdf(content, printer_uid):
             except subprocess.CalledProcessError as e:
                 print("---------------------------------------------------------------")
                 print(f"ERROR: Failed to print to specific printer '{printer_uid}'.")
-                print("This usually happens because the Default PDF Viewer does not support the 'PrintTo' command.")
-                print("SOLUTION: Install Adobe Acrobat Reader DC and set it as the default app for .pdf files.")
-                print(f"Details: {e}")
                 print("---------------------------------------------------------------")
+                print("POSSIBLE FIXES:")
+                print("1. (Recommended) Download 'SumatraPDF.exe' and place it in this folder.")
+                print("   The agent will automatically use it for reliable printing.")
+                print("2. Install Adobe Acrobat Reader DC and set it as default.")
+                print("---------------------------------------------------------------")
+                print(f"Details: {e}")
                 
                 # Fallback: Try printing to Default Printer
                 print("Attempting fallback: Printing to System Default Printer...")
