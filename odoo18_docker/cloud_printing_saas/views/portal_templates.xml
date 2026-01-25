@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="portal_my_home_menu_saas" name="Portal layout : SaaS Licenses" inherit_id="portal.portal_breadcrumbs" priority="20">
+        <xpath expr="//ol[hasclass('o_portal_submenu')]" position="inside">
+            <li t-if="page_name == 'saas_license'" class="breadcrumb-item active">
+                SaaS Licenses
+            </li>
+        </xpath>
+    </template>
+
+    <template id="portal_my_home_saas" name="Show SaaS Licenses" inherit_id="portal.portal_my_home" priority="20">
+        <xpath expr="//div[hasclass('o_portal_docs')]" position="inside">
+            <t t-call="portal.portal_docs_entry">
+                <t t-set="title">Printing Licenses</t>
+                <t t-set="url" t-value="'/my/saas'"/>
+                <t t-set="placeholder_count" t-value="'saas_license_count'"/>
+            </t>
+        </xpath>
+    </template>
+
+    <template id="portal_my_saas_licenses" name="My SaaS Licenses">
+        <t t-call="portal.portal_layout">
+            <t t-set="breadcrumbs_searchbar" t-value="True"/>
+
+            <t t-call="portal.portal_searchbar">
+                <t t-set="title">Licenses</t>
+            </t>
+            
+            <div t-if="not licenses" class="alert alert-warning mt8" role="alert">
+                There are no licenses linked to your account.
+            </div>
+            
+            <t t-if="licenses" t-call="portal.portal_table">
+                <thead>
+                    <tr class="active">
+                        <th>License Key</th>
+                        <th>Status</th>
+                        <th>Expiration Date</th>
+                        <th>Subscription</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <t t-foreach="licenses" t-as="license">
+                        <tr>
+                            <td>
+                                <span t-field="license.name"/>
+                                <button class="btn btn-sm btn-link copy-to-clipboard" t-att-data-clipboard-text="license.name" onclick="navigator.clipboard.writeText(this.getAttribute('data-clipboard-text')).then(() => alert('Copied!'))">
+                                    <i class="fa fa-copy"/>
+                                </button>
+                            </td>
+                            <td>
+                                <span class="badge rounded-pill text-bg-success" t-if="license.state == 'active'">Active</span>
+                                <span class="badge rounded-pill text-bg-warning" t-if="license.state == 'expired'">Expired</span>
+                                <span class="badge rounded-pill text-bg-secondary" t-if="license.state == 'draft'">Draft</span>
+                                <span class="badge rounded-pill text-bg-danger" t-if="license.state == 'cancelled'">Cancelled</span>
+                            </td>
+                            <td><span t-field="license.expiration_date"/></td>
+                            <td>
+                                <a t-if="license.subscription_id" t-att-href="'/my/orders/%s' % license.subscription_id.id">
+                                    <t t-esc="license.subscription_id.name"/>
+                                </a>
+                            </td>
+                        </tr>
+                    </t>
+                </tbody>
+            </t>
+        </t>
+    </template>
+</odoo>

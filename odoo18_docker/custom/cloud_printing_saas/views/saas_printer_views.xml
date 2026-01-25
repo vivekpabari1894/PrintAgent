@@ -1,0 +1,46 @@
+<odoo>
+    <!-- Printers -->
+    <record id="view_saas_printer_tree" model="ir.ui.view">
+        <field name="name">saas.printer.list</field>
+        <field name="model">saas.printer</field>
+        <field name="arch" type="xml">
+            <list create="false" edit="false">
+                <field name="name"/>
+                <field name="uid"/>
+                <field name="server_uid"/>
+                <field name="partner_id"/>
+                <field name="license_id"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_saas_printer" model="ir.actions.act_window">
+        <field name="name">Registered Printers</field>
+        <field name="res_model">saas.printer</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- Print Jobs -->
+    <record id="view_saas_print_job_tree" model="ir.ui.view">
+        <field name="name">saas.print.job.list</field>
+        <field name="model">saas.print.job</field>
+        <field name="arch" type="xml">
+            <list create="false" edit="false" decoration-info="status=='queued'" decoration-success="status=='done'" decoration-warning="status=='assigned'">
+                <field name="create_date"/>
+                <field name="printer_uid"/>
+                <field name="partner_id"/>
+                <field name="status"/>
+                <field name="license_id"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_saas_print_job" model="ir.actions.act_window">
+        <field name="name">Print Jobs</field>
+        <field name="res_model">saas.print.job</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <menuitem id="menu_saas_printer" name="Printers" parent="menu_saas_root" action="action_saas_printer" sequence="20"/>
+    <menuitem id="menu_saas_print_job" name="Jobs" parent="menu_saas_root" action="action_saas_print_job" sequence="30"/>
+</odoo>

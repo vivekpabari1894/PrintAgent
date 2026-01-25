@@ -1,0 +1,5 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_saas_license_manager,saas.license manager,model_saas_license,base.group_user,1,1,1,1
+access_saas_printer_manager,saas.printer manager,model_saas_printer,base.group_user,1,1,1,1
+access_saas_print_job_manager,saas.print.job manager,model_saas_print_job,base.group_user,1,1,1,1
+access_saas_license_portal,saas.license portal,model_saas_license,base.group_portal,1,0,0,0

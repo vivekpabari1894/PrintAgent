@@ -1,0 +1,11 @@
+<odoo>
+    <record id="ir_cron_check_saas_expirations" model="ir.cron">
+        <field name="name">SaaS: Check License Expirations</field>
+        <field name="model_id" ref="model_saas_license"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_check_expirations()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active" eval="True"/>
+    </record>
+</odoo>
