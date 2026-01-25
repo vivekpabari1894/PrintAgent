@@ -5,9 +5,9 @@ services:
     build: .
     depends_on:
       - db
-    ports:
-      - "8069:8069"
-      - "8071:8071" # Live Chat / Longpolling
+    expose:
+      - "8069"
+      - "8071"
     environment:
       - HOST=db
       - USER=odoo
@@ -15,7 +15,17 @@ services:
     volumes:
       - odoo-web-data:/var/lib/odoo
       - ./config:/etc/odoo
-      - ./addons:/mnt/extra-addons
+      - ../../:/mnt/extra-addons
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:latest
+    ports:
+      - "80:80"
+    depends_on:
+      - web
+    volumes:
+      - ./nginx/odoo.conf:/etc/nginx/conf.d/default.conf
     restart: unless-stopped
 
   db:
