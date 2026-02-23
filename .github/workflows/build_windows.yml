@@ -28,8 +28,13 @@ jobs:
       # We target bootloader.py, which imports the compiled 'agent'.
       # PyInstaller picks up agent.pyd automatically.
       run: pyinstaller --noconsole --onefile --name "CloudPrintAgent" --add-binary "SumatraPDF.exe;." bootloader.py
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
       with:
-        name: CloudPrintAgent-Windows
-        path: dist/CloudPrintAgent.exe
+        files: dist/CloudPrintAgent.exe
+        name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
