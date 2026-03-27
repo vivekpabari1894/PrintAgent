@@ -9,7 +9,7 @@ import os
 
 import argparse
 import sys
-
+import win32print
 import configparser
 
 # Default Configuration
@@ -234,6 +234,54 @@ def print_pdf(content, printer_uid):
             except Exception as rm_err:
                 print(f"Warning: Failed to delete temp file {filename}: {rm_err}")
 
+def print_raw(content, printer_uid):
+    raw_data = base64.b64decode(content)
+    
+    if printer_uid == "DEV_PDF":
+        filename = f"job_raw_{int(time.time())}.zpl"
+        with open(filename, "wb") as f:
+            f.write(raw_data)
+        print(f"Simulating raw print to {printer_uid}. Saved ZPL/RAW to {filename}")
+        return
+
+    try:
+        system = platform.system()
+        if system == "Darwin" or system == "Linux":
+            # For raw data, save to temp file and pass to lp -o raw
+            filename = f"job_raw_{int(time.time())}.zpl"
+            with open(filename, "wb") as f:
+                f.write(raw_data)
+            subprocess.run(["lp", "-d", printer_uid, "-o", "raw", filename], check=True)
+            print(f"Sent raw job {filename} to printer {printer_uid}")
+            if os.path.exists(filename):
+                try:
+                    os.remove(filename)
+                except Exception:
+                    pass
+
+        elif system == "Windows":
+            # Use win32print
+            try:
+                
+                hPrinter = win32print.OpenPrinter(printer_uid)
+                try:
+                    win32print.StartDocPrinter(hPrinter, 1, ("Cloud Print Job (Raw)", None, "RAW"))
+                    win32print.StartPagePrinter(hPrinter)
+                    win32print.WritePrinter(hPrinter, raw_data)
+                    win32print.EndPagePrinter(hPrinter)
+                    win32print.EndDocPrinter(hPrinter)
+                    print(f"Sent {len(raw_data)} bytes of RAW/ZPL data directly to {printer_uid}")
+                finally:
+                    win32print.ClosePrinter(hPrinter)
+            except ImportError:
+                print("win32print module missing. Raw printing may not be fully supported without it.")
+                raise RuntimeError("win32print is required for Windows raw printing")
+                
+    except Exception as e:
+        print(f"Failed to print RAW to {printer_uid}: {e}")
+        raise e
+
+
 import threading
 from PIL import Image, ImageDraw
 import pystray
@@ -323,7 +371,12 @@ def run_agent_loop(icon):
                 print(f"Received Job: {job.get('job_id')}")
                 icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
                 try:
-                    print_pdf(job["content"], job["printer_uid"])
+                    job_format = job.get("format", "pdf")
+                    if job_format in ["raw", "zpl"]:
+                        print_raw(job["content"], job["printer_uid"])
+                    else:
+                        print_pdf(job["content"], job["printer_uid"])
+                        
                     requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
                 except Exception as e:
                     print(f"Printing failed: {e}")
