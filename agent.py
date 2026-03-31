@@ -339,19 +339,34 @@ def load_logo():
     return image
 
 
+def show_notification(icon, message, title="Cloud Print Agent"):
+    """Show a notification. Uses pystray first, falls back to MessageBox."""
+    try:
+        icon.notify(message, title)
+    except Exception:
+        pass
+    # Also show a brief toast via ctypes as backup
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x40 | 0x40000)
+        # 0x40 = MB_ICONINFORMATION, 0x40000 = MB_TOPMOST
+    except Exception:
+        pass
+
 
 def run_agent_loop(icon):
     # Give the icon a moment to fully initialize before sending notifications
-    time.sleep(2)
+    time.sleep(3)
     
     if STARTUP_ERROR:
         print(f"Startup Error: {STARTUP_ERROR}")
         icon.title = "Agent Error: Missing Config"
-        icon.notify(STARTUP_ERROR, "Configuration Error")
+        show_notification(icon, STARTUP_ERROR, "Configuration Error")
         return
 
     # Startup notification so the user knows we're alive
-    icon.notify("Cloud Print Agent is now active in the system tray.", "Agent Started")
+    print(f"Agent Started. Sending notification...")
+    show_notification(icon, f"Cloud Print Agent is active.\nServer: {SERVER_ID}", "Agent Started")
 
     print(f"Agent Loop Started. Server ID: {SERVER_ID}")
     

@@ -26,6 +26,8 @@ jobs:
         cythonize -i -3 agent.py
         # Verify pyd exists
         dir *.pyd
+    - name: Generate EXE Icon
+      run: python gen_icon.py
     - name: Generate Version Info
       run: python gen_version_info.py
 
