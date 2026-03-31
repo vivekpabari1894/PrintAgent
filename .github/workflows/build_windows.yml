@@ -26,8 +26,6 @@ jobs:
         cythonize -i -3 agent.py
         # Verify pyd exists
         dir *.pyd
-    - name: Generate EXE Icon
-      run: python -c "from PIL import Image; img = Image.open('agent_logo.png').convert('RGBA'); img.save('agent_icon.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
     - name: Generate Version Info
       run: python gen_version_info.py
 
