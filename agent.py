@@ -341,11 +341,17 @@ def load_logo():
 
 
 def run_agent_loop(icon):
+    # Give the icon a moment to fully initialize before sending notifications
+    time.sleep(2)
+    
     if STARTUP_ERROR:
         print(f"Startup Error: {STARTUP_ERROR}")
         icon.title = "Agent Error: Missing Config"
         icon.notify(STARTUP_ERROR, "Configuration Error")
         return
+
+    # Startup notification so the user knows we're alive
+    icon.notify("Cloud Print Agent is now active in the system tray.", "Agent Started")
 
     print(f"Agent Loop Started. Server ID: {SERVER_ID}")
     
@@ -431,8 +437,7 @@ def run():
         mutex_name = f"Global\\OdooPrintAgent_{SERVER_ID}"
         mutex = win32event.CreateMutex(None, False, mutex_name)
         if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
-            # We don't notify since the previous instance might be hidden. 
-            # We just exit to prevent mess.
+            # Already running — just exit silently
             sys.exit(0)
 
     # GUI Mode Main Entry
@@ -451,22 +456,10 @@ def run():
     t = threading.Thread(target=run_agent_loop, args=(icon,), daemon=True)
     t.start()
     
-    # Initial Notification to User
-    icon.run_detached()
-    icon.notify("Cloud Print Agent is now active in the system tray.", "Agent Started")
-    
-    # Run UI (Blocking)
-    try:
-        # Since we used run_detached above, we need to stay alive or use icon.run()
-        # To avoid complexity, let's revert to standard icon.run() path but notify inside loop or thread
-        pass 
-    except KeyboardInterrupt:
-        pass
-
-    # Actually, pystray's notify works best after run() starts or using run_detached.
-    # Let's use the standard blocking run() and move notification to the thread.
+    # Run UI (Blocking) — this is the ONLY call to start the icon
     icon.run()
 
 
 if __name__ == '__main__':
     run()
+
