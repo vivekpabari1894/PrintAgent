@@ -93,7 +93,7 @@ def generate_server_id(license_key):
     return "server-" + hashlib.md5(unique_str.encode()).hexdigest()[:8]
 
 if not LICENSE_KEY:
-    STARTUP_ERROR = "License Key Missing. Checks agent.ini"
+    STARTUP_ERROR = "setup_needed"
 else:
     SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY)
     HEADERS = {"X-License-Key": LICENSE_KEY, "X-Server-ID": SERVER_ID}
@@ -358,10 +358,24 @@ def run_agent_loop(icon):
     # Give the icon a moment to fully initialize before sending notifications
     time.sleep(3)
     
-    if STARTUP_ERROR:
+    if STARTUP_ERROR == "setup_needed":
+        print(f"Startup: License key not configured.")
+        icon.title = "Cloud Print Agent - Setup Required"
+        show_notification(
+            icon,
+            "Welcome to Cloud Print Agent!\n\n"
+            "To get started:\n"
+            "1. Right-click the tray icon\n"
+            "2. Click 'Edit Config'\n"
+            "3. Add your License Key\n"
+            "4. Restart the agent",
+            "Setup Required"
+        )
+        return
+    elif STARTUP_ERROR:
         print(f"Startup Error: {STARTUP_ERROR}")
-        icon.title = "Agent Error: Missing Config"
-        show_notification(icon, STARTUP_ERROR, "Configuration Error")
+        icon.title = "Cloud Print Agent - Error"
+        show_notification(icon, STARTUP_ERROR, "Cloud Print Agent")
         return
 
     # Startup notification so the user knows we're alive
