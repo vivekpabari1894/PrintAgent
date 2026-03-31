@@ -10,6 +10,9 @@ import os
 import argparse
 import sys
 import win32print
+import win32event
+import win32api
+import winerror
 import configparser
 
 # Default Configuration
@@ -312,16 +315,30 @@ if not os.environ.get('AGENT_CONSOLE_DEBUG'):
     sys.stdout = Logger()
     sys.stderr = sys.stdout
 
-def create_image():
-    # Generate a simple icon programmatically (64x64 blue box with a P)
-    width = 64
-    height = 64
-    color1 = "blue"
-    color2 = "white"
-    image = Image.new('RGB', (width, height), color1)
-    dc = ImageDraw.Draw(image)
-    dc.rectangle((16, 16, 48, 48), fill=color2)
+def load_logo():
+    """
+    Loads the official agent_logo.png from the bundled resources.
+    Falls back to a simple blue dot if not found.
+    """
+    logo_path = None
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # Running as a bundled EXE
+        logo_path = os.path.join(sys._MEIPASS, 'agent_logo.png')
+    else:
+        # Running in dev mode
+        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_logo.png')
+
+    if logo_path and os.path.exists(logo_path):
+        try:
+            return Image.open(logo_path)
+        except Exception as e:
+            print(f"Error loading logo: {e}")
+            
+    # Fallback to Odoo-blue dot
+    image = Image.new('RGB', (64, 64), (34, 113, 177))
     return image
+
+
 
 def run_agent_loop(icon):
     if STARTUP_ERROR:
@@ -409,26 +426,47 @@ def on_exit(icon, item):
 
 # Main Execution wrapper for Cython
 def run():
+    # 0. Single Instance Check (Windows Only)
+    if platform.system() == "Windows":
+        mutex_name = f"Global\\OdooPrintAgent_{SERVER_ID}"
+        mutex = win32event.CreateMutex(None, False, mutex_name)
+        if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+            # We don't notify since the previous instance might be hidden. 
+            # We just exit to prevent mess.
+            sys.exit(0)
+
     # GUI Mode Main Entry
     icon = pystray.Icon("CloudPrintAgent")
     icon.menu = pystray.Menu(
         pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
+        pystray.MenuItem("Status: Online", lambda i, item: None, enabled=False),
         pystray.MenuItem("View Log", on_open_log),
         pystray.MenuItem("Edit Config", on_open_config),
         pystray.MenuItem("Exit", on_exit)
     )
-    icon.icon = create_image()
+    icon.icon = load_logo()
     icon.title = f"Cloud Print Agent ({SERVER_ID})"
     
     # Start Agent Thread
     t = threading.Thread(target=run_agent_loop, args=(icon,), daemon=True)
     t.start()
     
+    # Initial Notification to User
+    icon.run_detached()
+    icon.notify("Cloud Print Agent is now active in the system tray.", "Agent Started")
+    
     # Run UI (Blocking)
     try:
-        icon.run()
+        # Since we used run_detached above, we need to stay alive or use icon.run()
+        # To avoid complexity, let's revert to standard icon.run() path but notify inside loop or thread
+        pass 
     except KeyboardInterrupt:
         pass
+
+    # Actually, pystray's notify works best after run() starts or using run_detached.
+    # Let's use the standard blocking run() and move notification to the thread.
+    icon.run()
+
 
 if __name__ == '__main__':
     run()
