@@ -6,7 +6,7 @@ import requests
 import platform
 import subprocess
 import os
-
+import getpass
 import argparse
 import sys
 import win32print
@@ -96,7 +96,11 @@ if not LICENSE_KEY:
     STARTUP_ERROR = "setup_needed"
 else:
     SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY)
-    HEADERS = {"X-License-Key": LICENSE_KEY, "X-Server-ID": SERVER_ID}
+    HEADERS = {
+        "X-License-Key": LICENSE_KEY, 
+        "X-Server-ID": SERVER_ID,
+        "X-OS-User": getpass.getuser()
+    }
 
 
 
@@ -130,16 +134,44 @@ def get_printers():
             output = subprocess.check_output(["lpstat", "-a"]).decode("utf-8")
             for line in output.splitlines():
                 if line.strip():
-                    printers.append(line.split(' ')[0])
+                    name = line.split(' ')[0]
+                    printers.append({"uid": name, "name": name, "status": "Normal"})
         elif system == "Windows":
-             # Basic Powershell command to list printers
-            cmd = 'powershell "Get-Printer | Select-Object Name"'
-            output = subprocess.check_output(cmd, shell=True).decode("utf-8")
+             # We want Name and PrinterStatus
+            cmd = 'powershell "Get-Printer | Select-Object Name, PrinterStatus"'
+            output = subprocess.check_output(cmd, shell=True).decode("latin-1")
             lines = output.splitlines()
             # Skip header and empty lines
-            for line in lines[2:]:
-                if line.strip():
-                     printers.append(line.strip())
+            # Name            PrinterStatus
+            # ----            -------------
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith("Name") or line.startswith("----"):
+                    continue
+                # Split by whitespace but keep Name together if it has spaces?
+                # Actually, Get-Printer format uses fixed width usually. 
+                # Better: Use Select-Object Name, PrinterStatus | ConvertTo-Json
+                pass
+            
+            # Re-implementing more robust with JSON
+            json_cmd = 'powershell "Get-Printer | Select-Object Name, PrinterStatus | ConvertTo-Json"'
+            try:
+                raw_json = subprocess.check_output(json_cmd, shell=True).decode("latin-1")
+                p_data = json.loads(raw_json)
+                if not isinstance(p_data, list):
+                    p_data = [p_data]
+                for p in p_data:
+                    printers.append({
+                        "os_id": p.get("Name"),
+                        "name": p.get("Name"),
+                        "status": str(p.get("PrinterStatus", "Normal"))
+                    })
+            except Exception as j_err:
+                # Fallback if json fails
+                print(f"JSON Discovery fallback: {j_err}")
+                for line in lines[2:]:
+                    if line.strip():
+                        printers.append(line.strip())
     except Exception as e:
         print(f"Error discovering printers: {e}")
     return printers
@@ -354,13 +386,40 @@ def show_notification(icon, message, title="Cloud Print Agent"):
         pass
 
 
+# Dynamic Status
+AGENT_STATUS = "Offline"
+
+def update_status(icon, status, notify_msg=None):
+    global AGENT_STATUS
+    if AGENT_STATUS == status:
+        return
+    
+    AGENT_STATUS = status
+    print(f"Status changed: {status}")
+    
+    # 1. Update Tooltip
+    icon.title = f"Cloud Print Agent ({status}) - {SERVER_ID}"
+    
+    # 2. Re-create Menu to refresh text
+    # Note: We duplicate the labels here. 
+    icon.menu = pystray.Menu(
+        pystray.MenuItem(f"Server ID: {SERVER_ID}", lambda i, item: None, enabled=False),
+        pystray.MenuItem(f"Status: {AGENT_STATUS}", lambda i, item: None, enabled=False),
+        pystray.MenuItem("View Log", on_open_log),
+        pystray.MenuItem("Edit Config", on_open_config),
+        pystray.MenuItem("Exit", on_exit)
+    )
+    
+    # 3. Notification for errors
+    if notify_msg:
+        show_notification(icon, notify_msg, f"Agent {status}")
+
 def run_agent_loop(icon):
     # Give the icon a moment to fully initialize before sending notifications
     time.sleep(3)
     
     if STARTUP_ERROR == "setup_needed":
-        print(f"Startup: License key not configured.")
-        icon.title = "Cloud Print Agent - Setup Required"
+        update_status(icon, "Setup Needed")
         show_notification(
             icon,
             "Welcome to Cloud Print Agent!\n\n"
@@ -373,35 +432,44 @@ def run_agent_loop(icon):
         )
         return
     elif STARTUP_ERROR:
-        print(f"Startup Error: {STARTUP_ERROR}")
-        icon.title = "Cloud Print Agent - Error"
+        update_status(icon, "Config Error")
         show_notification(icon, STARTUP_ERROR, "Cloud Print Agent")
         return
 
-    # Startup notification so the user knows we're alive
-    print(f"Agent Started. Sending notification...")
-    show_notification(icon, f"Cloud Print Agent is active.\nServer: {SERVER_ID}", "Agent Started")
-
-    print(f"Agent Loop Started. Server ID: {SERVER_ID}")
+    update_status(icon, "Started", f"Cloud Print Agent is active.\nServer: {SERVER_ID}")
     
     # Initial Discovery
     try:
         discovered_printers = get_printers()
         if DEV_MODE:
-            discovered_printers.append({"os_id": "DEV_PDF", "name": "Dev PDF Printer"})
+            discovered_printers.append({"os_id": "DEV_PDF", "name": "Dev PDF Printer", "status": "Normal"})
             
         if discovered_printers:
             print(f"Discovered: {len(discovered_printers)} printers.")
             try:
-                response = requests.post(f"{API}/api/agent/printers", json={"printers": discovered_printers, "server_uid": SERVER_ID}, headers=HEADERS)
-                if response.status_code in [401, 403]:
-                    print(f"AUTH ERROR during sync: {response.text}")
-                    icon.notify("Authentication Failed. Check agent.ini", "Cloud Print Error")
+                payload = {
+                    "printers": discovered_printers, 
+                    "server_uid": SERVER_ID,
+                    "os_user": getpass.getuser()
+                }
+                response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=10)
+                
+                if response.status_code == 401:
+                    update_status(icon, "Invalid Key", "Access Denied: The license key is invalid.")
+                elif response.status_code == 403:
+                    update_status(icon, "Limit Reached", "Access Denied: Plan limit reached (Max print servers).")
+                elif response.status_code == 200:
+                    update_status(icon, "Online")
+                else:
+                    update_status(icon, f"Error {response.status_code}")
+                
                 response.raise_for_status()
             except Exception as e:
                 print(f"Sync Failed: {e}")
+                update_status(icon, "Offline")
     except Exception as e:
         print(f"Startup Failed: {e}")
+        update_status(icon, "Critical Error")
 
     # Main Loop
     while True:
@@ -409,12 +477,20 @@ def run_agent_loop(icon):
             break # Stop if icon hidden (exit)
             
         try:
-            response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS)
+            response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS, timeout=10)
             
-            if response.status_code in [401, 403]:
-                 print("Auth Error polling jobs.")
-                 time.sleep(10)
+            if response.status_code == 401:
+                 update_status(icon, "Invalid Key", "Access Denied: The license key is invalid or has been revoked.")
+                 time.sleep(60)
                  continue
+            elif response.status_code == 403:
+                 update_status(icon, "Limit Reached", "Access Denied: Your subscription limit has been reached.")
+                 time.sleep(60)
+                 continue
+            elif response.status_code == 200:
+                 update_status(icon, "Online")
+            else:
+                 update_status(icon, f"Error {response.status_code}")
 
             response.raise_for_status()
             job = response.json()
