@@ -161,12 +161,19 @@ def get_printers():
                 p_data = json.loads(raw_json)
                 if not isinstance(p_data, list):
                     p_data = [p_data]
+                
+                seen_uids = set()
                 for p in p_data:
+                    p_uid = p.get("Name")
+                    if not p_uid or p_uid in seen_uids:
+                        continue
+                        
                     printers.append({
-                        "os_id": p.get("Name"),
-                        "name": p.get("Name"),
+                        "os_id": p_uid,
+                        "name": p_uid,
                         "status": str(p.get("PrinterStatus", "Normal"))
                     })
+                    seen_uids.add(p_uid)
             except Exception as j_err:
                 # Fallback if json fails
                 print(f"JSON Discovery fallback: {j_err}")
