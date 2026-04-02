@@ -13,8 +13,46 @@ import win32print
 import win32event
 import win32api
 import winerror
+import winreg as reg
+import ctypes
 import configparser
 import json
+
+def set_run_at_startup(app_name, action="install"):
+    """
+    Manage Windows startup registration via Registry (HKCU)
+    """
+    if platform.system() != "Windows":
+        return False
+        
+    registry_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, registry_key, 0, reg.KEY_ALL_ACCESS)
+        
+        if action == "install":
+            if getattr(sys, 'frozen', False):
+                # We are running as a compiled exe
+                app_path = sys.executable
+            else:
+                # We are running as a python script
+                app_path = f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
+            
+            # Use 'headless' or similar if we want it silent? 
+            # Current agent has a tray, so normal app_path is fine.
+            reg.SetValueEx(key, app_name, 0, reg.REG_SZ, app_path)
+            # print(f"Registered {app_name} for startup at: {app_path}")
+        elif action == "remove":
+            try:
+                reg.DeleteValue(key, app_name)
+            except FileNotFoundError:
+                pass # Already gone
+        
+        reg.CloseKey(key)
+        return True
+    except Exception as e:
+        print(f"Failed to manage startup registry: {e}")
+        return False
 
 # Default Configuration
 API_DEFAULT = "http://localhost:8019" # Updated to your port 8019
@@ -43,42 +81,42 @@ if os.path.exists(config_file):
 
 # Get defaults from config if available
 DEV_MODE = False
+AUTO_START_DEFAULT = True
 if 'General' in config:
     API_DEFAULT = config['General'].get('api', API_DEFAULT)
     SERVER_ID_DEFAULT = config['General'].get('server_id', SERVER_ID_DEFAULT)
     LICENSE_KEY_DEFAULT = config['General'].get('license_key', LICENSE_KEY_DEFAULT)
     DEV_MODE = config['General'].getboolean('dev_mode', False)
+    AUTO_START_DEFAULT = config['General'].getboolean('auto_start', True)
     PRINT_SETTINGS_DEFAULT = config['General'].get('print_settings', 'fit')
 
-# ... imports ...
-
-
 # 2. Parse Arguments (Overrides Config)
-# function to parse args safely without exiting
 def parse_args_safe():
     parser = argparse.ArgumentParser(description='Cloud Print Agent')
     parser.add_argument('--api', default=API_DEFAULT, help='Cloud API URL')
     parser.add_argument('--server-id', default=SERVER_ID_DEFAULT, help='Unique Server ID')
     parser.add_argument('--license-key', default=LICENSE_KEY_DEFAULT, help='SaaS License Key')
     parser.add_argument('--dev', action='store_true', help='Enable Dev Mode (Simulated Printer)')
+    parser.add_argument('--auto-start', action='store_true', default=AUTO_START_DEFAULT, help='Enable/Disable Windows Startup')
     
-    # In GUI mode, sys.argv might have weird stuff or nothing. 
-    # If called from bootloader/noconsole, standard parsing is fine.
     try:
         args, unknown = parser.parse_known_args()
         return args
     except:
-        return argparse.Namespace(api=API_DEFAULT, server_id=SERVER_ID_DEFAULT, license_key=LICENSE_KEY_DEFAULT, dev=False)
+        return argparse.Namespace(api=API_DEFAULT, server_id=SERVER_ID_DEFAULT, license_key=LICENSE_KEY_DEFAULT, dev=False, auto_start=AUTO_START_DEFAULT)
 
-# Global variables will be set in run()
+# Global variables
 API = API_DEFAULT
 LICENSE_KEY = LICENSE_KEY_DEFAULT
 SERVER_ID = SERVER_ID_DEFAULT
+AUTO_START = AUTO_START_DEFAULT
 HEADERS = {}
 STARTUP_ERROR = None
 
-# Validation Logic moved to run()
 args = parse_args_safe()
+AUTO_START = args.auto_start
+
+# Validation Logic moved to run()
 if args.dev:
     DEV_MODE = True
 if args.api:
@@ -538,7 +576,7 @@ def on_open_config(icon, item):
     else:
         # Create default
         with open("agent.ini", "w") as f:
-            f.write(f"[General]\napi={API_DEFAULT}\nlicense_key=\n")
+            f.write(f"[General]\napi={API_DEFAULT}\nlicense_key=\nauto_start=True\n")
         os.startfile("agent.ini")
 
 def on_exit(icon, item):
@@ -550,13 +588,17 @@ def on_exit(icon, item):
 
 # Main Execution wrapper for Cython
 def run():
-    # 0. Single Instance Check (Windows Only)
     if platform.system() == "Windows":
         mutex_name = f"Global\\OdooPrintAgent_{SERVER_ID}"
         mutex = win32event.CreateMutex(None, False, mutex_name)
         if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
-            # Already running — just exit silently
             sys.exit(0)
+            
+        # Startup Registration
+        if AUTO_START:
+            set_run_at_startup("OdooPrintAgent", action="install")
+        else:
+            set_run_at_startup("OdooPrintAgent", action="remove")
 
     # GUI Mode Main Entry
     icon = pystray.Icon("CloudPrintAgent")
