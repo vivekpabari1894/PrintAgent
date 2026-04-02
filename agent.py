@@ -379,7 +379,8 @@ import webbrowser
 class Logger(object):
     def __init__(self):
         self.terminal = sys.stdout
-        self.log = open("agent.log", "a", encoding='utf-8')
+        log_path = os.path.join(application_path, "agent.log")
+        self.log = open(log_path, "a", encoding='utf-8')
 
     def write(self, message):
         # self.terminal.write(message) # Uncomment if debugging with console
@@ -567,17 +568,18 @@ def run_agent_loop(icon):
         time.sleep(5)
 
 def on_open_log(icon, item):
-    if os.path.exists("agent.log"):
-        os.startfile("agent.log")
+    log_path = os.path.join(application_path, "agent.log")
+    if os.path.exists(log_path):
+        os.startfile(log_path)
 
 def on_open_config(icon, item):
-    if os.path.exists("agent.ini"):
-        os.startfile("agent.ini")
+    if os.path.exists(config_file):
+        os.startfile(config_file)
     else:
         # Create default
-        with open("agent.ini", "w") as f:
+        with open(config_file, "w") as f:
             f.write(f"[General]\napi={API_DEFAULT}\nlicense_key=\nauto_start=True\n")
-        os.startfile("agent.ini")
+        os.startfile(config_file)
 
 def on_exit(icon, item):
     icon.visible = False
