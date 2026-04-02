@@ -48,7 +48,7 @@ if 'General' in config:
     SERVER_ID_DEFAULT = config['General'].get('server_id', SERVER_ID_DEFAULT)
     LICENSE_KEY_DEFAULT = config['General'].get('license_key', LICENSE_KEY_DEFAULT)
     DEV_MODE = config['General'].getboolean('dev_mode', False)
-    PRINT_SETTINGS_DEFAULT = config['General'].get('print_settings', 'fit,image')
+    PRINT_SETTINGS_DEFAULT = config['General'].get('print_settings', 'fit')
 
 # ... imports ...
 
