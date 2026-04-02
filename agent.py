@@ -48,6 +48,7 @@ if 'General' in config:
     SERVER_ID_DEFAULT = config['General'].get('server_id', SERVER_ID_DEFAULT)
     LICENSE_KEY_DEFAULT = config['General'].get('license_key', LICENSE_KEY_DEFAULT)
     DEV_MODE = config['General'].getboolean('dev_mode', False)
+    PRINT_SETTINGS_DEFAULT = config['General'].get('print_settings', 'fit,image')
 
 # ... imports ...
 
@@ -228,11 +229,15 @@ def print_pdf(content, printer_uid):
             
             if sumatra_path and os.path.exists(sumatra_path):
                 print(f"Printing via SumatraPDF...")
-                # Sumatra command: SumatraPDF.exe -print-to "Printer Name" -exit-on-print "file.pdf"
+                # Sumatra command: SumatraPDF.exe -print-to "Printer Name" -print-settings "settings" -exit-on-print -silent "file.pdf"
                 # -silent prevents the window from showing up
-                cmd = [sumatra_path, '-print-to', printer_uid, '-exit-on-print', '-silent', abs_path]
+                
+                # Get settings from global or args (args not implemented yet, using global)
+                settings = PRINT_SETTINGS_DEFAULT 
+                
+                cmd = [sumatra_path, '-print-to', printer_uid, '-print-settings', settings, '-exit-on-print', '-silent', abs_path]
                 subprocess.run(cmd, check=True)
-                print("Sent to printer via SumatraPDF.")
+                print(f"Sent to printer via SumatraPDF with settings: {settings}")
                 return # Success
             
             # 2. OPTION B: PowerShell (Fallback)
