@@ -1,627 +1,308 @@
-
 import time
-import base64
-import requests
-
 import platform
 import subprocess
 import os
-import getpass
-import argparse
+import ctypes
 import sys
-import win32print
 import win32event
 import win32api
 import winerror
 import winreg as reg
-import ctypes
-import configparser
-import json
 
-def set_run_at_startup(app_name, action="install"):
-    """
-    Manage Windows startup registration via Registry (HKCU)
-    """
-    if platform.system() != "Windows":
-        return False
-        
-    registry_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    
-    try:
-        key = reg.OpenKey(reg.HKEY_CURRENT_USER, registry_key, 0, reg.KEY_ALL_ACCESS)
-        
-        if action == "install":
-            if getattr(sys, 'frozen', False):
-                # We are running as a compiled exe
-                app_path = sys.executable
-            else:
-                # We are running as a python script
-                app_path = f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
-            
-            # Use 'headless' or similar if we want it silent? 
-            # Current agent has a tray, so normal app_path is fine.
-            reg.SetValueEx(key, app_name, 0, reg.REG_SZ, app_path)
-            # print(f"Registered {app_name} for startup at: {app_path}")
-        elif action == "remove":
-            try:
-                reg.DeleteValue(key, app_name)
-            except FileNotFoundError:
-                pass # Already gone
-        
-        reg.CloseKey(key)
-        return True
-    except Exception as e:
-        print(f"Failed to manage startup registry: {e}")
-        return False
+# Global variables (initialized in run())
+API = ""
+LICENSE_KEY = ""
+SERVER_ID = ""
+AUTO_START = True
+HEADERS = {}
+STARTUP_ERROR = None
+DEV_MODE = False
 
-# Default Configuration
-API_DEFAULT = "http://localhost:8019" # Updated to your port 8019
-SERVER_ID_DEFAULT = ""
-LICENSE_KEY_DEFAULT = ""
-
-import hashlib
-import uuid
-
-# 1. Load Config File (if exists)
-config = configparser.ConfigParser()
-
-# robustly find agent.ini in the same folder as the exe/script
+# Application Paths (Safe to keep at top level as they use fast os/sys)
 if getattr(sys, 'frozen', False):
     application_path = os.path.dirname(sys.executable)
 else:
     application_path = os.path.dirname(os.path.abspath(__file__))
 
 config_file = os.path.join(application_path, 'agent.ini')
+log_path = os.path.join(application_path, 'agent.log')
 
-if os.path.exists(config_file):
+def set_run_at_startup(app_name, action="install"):
+    if platform.system() != "Windows": return False
+    registry_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
     try:
-        config.read(config_file)
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, registry_key, 0, reg.KEY_ALL_ACCESS)
+        if action == "install":
+            app_path = sys.executable if getattr(sys, 'frozen', False) else f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
+            final_path = app_path if app_path.startswith('"') else f'"{app_path}"'
+            reg.SetValueEx(key, app_name, 0, reg.REG_SZ, final_path)
+            reg.FlushKey(key)
+        elif action == "remove":
+            try: reg.DeleteValue(key, app_name)
+            except (FileNotFoundError, OSError): pass
+        reg.CloseKey(key)
+        return True
     except Exception as e:
-        print(f"Error reading config: {e}")
+        print(f"Failed to manage startup registry: {e}")
+        return False
 
-# Get defaults from config if available
-DEV_MODE = False
-AUTO_START_DEFAULT = True
-if 'General' in config:
-    API_DEFAULT = config['General'].get('api', API_DEFAULT)
-    SERVER_ID_DEFAULT = config['General'].get('server_id', SERVER_ID_DEFAULT)
-    LICENSE_KEY_DEFAULT = config['General'].get('license_key', LICENSE_KEY_DEFAULT)
-    DEV_MODE = config['General'].getboolean('dev_mode', False)
-    AUTO_START_DEFAULT = config['General'].getboolean('auto_start', True)
-    PRINT_SETTINGS_DEFAULT = config['General'].get('print_settings', 'fit')
-
-# 2. Parse Arguments (Overrides Config)
-def parse_args_safe():
-    parser = argparse.ArgumentParser(description='Cloud Print Agent')
-    parser.add_argument('--api', default=API_DEFAULT, help='Cloud API URL')
-    parser.add_argument('--server-id', default=SERVER_ID_DEFAULT, help='Unique Server ID')
-    parser.add_argument('--license-key', default=LICENSE_KEY_DEFAULT, help='SaaS License Key')
-    parser.add_argument('--dev', action='store_true', help='Enable Dev Mode (Simulated Printer)')
-    parser.add_argument('--auto-start', action='store_true', default=AUTO_START_DEFAULT, help='Enable/Disable Windows Startup')
-    
-    try:
-        args, unknown = parser.parse_known_args()
-        return args
-    except:
-        return argparse.Namespace(api=API_DEFAULT, server_id=SERVER_ID_DEFAULT, license_key=LICENSE_KEY_DEFAULT, dev=False, auto_start=AUTO_START_DEFAULT)
-
-# Global variables
-API = API_DEFAULT
-LICENSE_KEY = LICENSE_KEY_DEFAULT
-SERVER_ID = SERVER_ID_DEFAULT
-AUTO_START = AUTO_START_DEFAULT
-HEADERS = {}
-STARTUP_ERROR = None
-
-args = parse_args_safe()
-AUTO_START = args.auto_start
-
-# Validation Logic moved to run()
-if args.dev:
-    DEV_MODE = True
-if args.api:
-    API = args.api
-if args.server_id:
-    SERVER_ID = args.server_id # Temporary, will be finalized in run()
-if args.license_key:
-    LICENSE_KEY = args.license_key
-
-def generate_server_id(license_key):
-    # ... existing logic ...
-    mac = uuid.getnode()
-    unique_str = f"{mac}-{license_key}"
-    return "server-" + hashlib.md5(unique_str.encode()).hexdigest()[:8]
-
-if not LICENSE_KEY:
-    STARTUP_ERROR = "setup_needed"
-else:
-    SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY)
-    HEADERS = {
-        "X-License-Key": LICENSE_KEY, 
-        "X-Server-ID": SERVER_ID,
-        "X-OS-User": getpass.getuser()
-    }
-
-
-
-def generate_server_id(license_key):
-    # Combine MAC address and License Key to ensure uniqueness per machine per license
-    mac = uuid.getnode()
-    unique_str = f"{mac}-{license_key}"
-    return "server-" + hashlib.md5(unique_str.encode()).hexdigest()[:8]
-
-API = args.api
-LICENSE_KEY = args.license_key
-SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY)
-HEADERS = {"X-License-Key": LICENSE_KEY, "X-Server-ID": SERVER_ID}
-
-print("="*60)
-print(f"   CLOUD PRINT AGENT STARTED")
-print(f"   SERVER ID: {SERVER_ID}")
-print("-" * 60)
-print("   ACTION REQUIRED:")
-print("   1. Go to your Odoo -> Cloud Printing -> Print Servers")
-print(f"   2. Create a new server with Identifier: {SERVER_ID}")
-print("   3. Click 'Sync Printers'")
-print("="*60)
-
-def get_printers():
-    printers = []
-    system = platform.system()
-    try:
-        if system == "Darwin" or system == "Linux":
-            # lpstat -a output format: "printer_name accepting requests since..."
-            output = subprocess.check_output(["lpstat", "-a"]).decode("utf-8")
-            for line in output.splitlines():
-                if line.strip():
-                    name = line.split(' ')[0]
-                    printers.append({"uid": name, "name": name, "status": "Normal"})
-        elif system == "Windows":
-             # We want Name and PrinterStatus
-            cmd = 'powershell "Get-Printer | Select-Object Name, PrinterStatus"'
-            output = subprocess.check_output(cmd, shell=True).decode("latin-1")
-            lines = output.splitlines()
-            # Skip header and empty lines
-            # Name            PrinterStatus
-            # ----            -------------
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith("Name") or line.startswith("----"):
-                    continue
-                # Split by whitespace but keep Name together if it has spaces?
-                # Actually, Get-Printer format uses fixed width usually. 
-                # Better: Use Select-Object Name, PrinterStatus | ConvertTo-Json
-                pass
-            
-            # Re-implementing more robust with JSON
-            json_cmd = 'powershell "Get-Printer | Select-Object Name, PrinterStatus | ConvertTo-Json"'
-            try:
-                raw_json = subprocess.check_output(json_cmd, shell=True).decode("latin-1")
-                p_data = json.loads(raw_json)
-                if not isinstance(p_data, list):
-                    p_data = [p_data]
-                
-                seen_uids = set()
-                for p in p_data:
-                    p_uid = p.get("Name")
-                    if not p_uid or p_uid in seen_uids:
-                        continue
-                        
-                    printers.append({
-                        "os_id": p_uid,
-                        "name": p_uid,
-                        "status": str(p.get("PrinterStatus", "Normal"))
-                    })
-                    seen_uids.add(p_uid)
-            except Exception as j_err:
-                # Fallback if json fails
-                print(f"JSON Discovery fallback: {j_err}")
-                for line in lines[2:]:
-                    if line.strip():
-                        printers.append(line.strip())
-    except Exception as e:
-        print(f"Error discovering printers: {e}")
-    return printers
-
-def print_pdf(content, printer_uid):
-    filename = f"job_{int(time.time())}.pdf"
-    with open(filename, "wb") as f:
-        f.write(base64.b64decode(content))
-    print(f"Saved job to {filename}")
-
-    if printer_uid == "DEV_PDF":
-        print(f"Simulating print to {printer_uid}")
-        # Keep file for manual inspection
-        return
-
-    try:
-        system = platform.system()
-        if system == "Darwin" or system == "Linux":
-            # lp -d printer_name filename
-            subprocess.run(["lp", "-d", printer_uid, filename], check=True)
-            print(f"Sent {filename} to printer {printer_uid}")
-        elif system == "Windows":
-            # os imported globally now
-            abs_path = os.path.abspath(filename)
-            printer_name_escaped = printer_uid.replace('"', '`"')
-            
-            # 1. OPTION A: SumatraPDF (Recommended & Bundled)
-            # Check for bundled SumatraPDF in PyInstaller temp folder (_MEIPASS)
-            sumatra_path = None
-            
-            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-                # Bundled in single-file EXE
-                bundled_path = os.path.join(sys._MEIPASS, 'SumatraPDF.exe')
-                if os.path.exists(bundled_path):
-                     sumatra_path = bundled_path
-            
-            # If not bundled, check local folder (for dev/testing)
-            if not sumatra_path:
-                if getattr(sys, 'frozen', False):
-                    app_dir = os.path.dirname(sys.executable)
-                else:
-                    app_dir = os.path.dirname(os.path.abspath(__file__))
-                local_path = os.path.join(app_dir, 'SumatraPDF.exe')
-                if os.path.exists(local_path):
-                    sumatra_path = local_path
-            
-            if sumatra_path and os.path.exists(sumatra_path):
-                print(f"Printing via SumatraPDF...")
-                # Sumatra command: SumatraPDF.exe -print-to "Printer Name" -print-settings "settings" -exit-on-print -silent "file.pdf"
-                # -silent prevents the window from showing up
-                
-                # Get settings from global or args (args not implemented yet, using global)
-                settings = PRINT_SETTINGS_DEFAULT 
-                
-                cmd = [sumatra_path, '-print-to', printer_uid, '-print-settings', settings, '-exit-on-print', '-silent', abs_path]
-                subprocess.run(cmd, check=True)
-                print(f"Sent to printer via SumatraPDF with settings: {settings}")
-                return # Success
-            
-            # 2. OPTION B: PowerShell (Fallback)
-            # Using Powershell's Start-Process with 'PrintTo' verb. 
-            # REQUIRES a PDF reader associated with .pdf files that supports the 'PrintTo' verb (e.g. Adobe Reader, Foxit).
-            
-            print("SumatraPDF.exe not found. Falling back to System Default PDF Viewer...")
-            
-            cmd = f'powershell -Command "Start-Process -FilePath \'{abs_path}\' -Verb PrintTo -ArgumentList \'{printer_name_escaped}\' -PassThru -Wait"'
-            
-            print(f"Attempting to print {filename} to {printer_uid}...")
-            try:
-                subprocess.run(cmd, shell=True, check=True)
-                print(f"Command sent to {printer_uid}.")
-            except subprocess.CalledProcessError as e:
-                print("---------------------------------------------------------------")
-                print(f"ERROR: Failed to print to specific printer '{printer_uid}'.")
-                print("---------------------------------------------------------------")
-                print("POSSIBLE FIXES:")
-                print("1. (Recommended) Download 'SumatraPDF.exe' and place it in this folder.")
-                print("   The agent will automatically use it for reliable printing.")
-                print("2. Install Adobe Acrobat Reader DC and set it as default.")
-                print("---------------------------------------------------------------")
-                print(f"Details: {e}")
-                
-                # Fallback: Try printing to Default Printer
-                print("Attempting fallback: Printing to System Default Printer...")
-                try:
-                    fallback_cmd = f'powershell -Command "Start-Process -FilePath \'{abs_path}\' -Verb Print -PassThru -Wait"'
-                    subprocess.run(fallback_cmd, shell=True, check=True)
-                    print("Fallback successful: Sent to Default Printer.")
-                except Exception as ex:
-                    print(f"Fallback failed: {ex}")
-    except Exception as e:
-        print(f"Failed to print to {printer_uid}: {e}")
-    finally:
-        # Cleanup temp file
-        if os.path.exists(filename):
-            try:
-                os.remove(filename)
-                print(f"Cleaned up temp file: {filename}")
-            except Exception as rm_err:
-                print(f"Warning: Failed to delete temp file {filename}: {rm_err}")
-
-def print_raw(content, printer_uid):
-    raw_data = base64.b64decode(content)
-    
-    if printer_uid == "DEV_PDF":
-        filename = f"job_raw_{int(time.time())}.zpl"
-        with open(filename, "wb") as f:
-            f.write(raw_data)
-        print(f"Simulating raw print to {printer_uid}. Saved ZPL/RAW to {filename}")
-        return
-
-    try:
-        system = platform.system()
-        if system == "Darwin" or system == "Linux":
-            # For raw data, save to temp file and pass to lp -o raw
-            filename = f"job_raw_{int(time.time())}.zpl"
-            with open(filename, "wb") as f:
-                f.write(raw_data)
-            subprocess.run(["lp", "-d", printer_uid, "-o", "raw", filename], check=True)
-            print(f"Sent raw job {filename} to printer {printer_uid}")
-            if os.path.exists(filename):
-                try:
-                    os.remove(filename)
-                except Exception:
-                    pass
-
-        elif system == "Windows":
-            # Use win32print
-            try:
-                
-                hPrinter = win32print.OpenPrinter(printer_uid)
-                try:
-                    win32print.StartDocPrinter(hPrinter, 1, ("Cloud Print Job (Raw)", None, "RAW"))
-                    win32print.StartPagePrinter(hPrinter)
-                    win32print.WritePrinter(hPrinter, raw_data)
-                    win32print.EndPagePrinter(hPrinter)
-                    win32print.EndDocPrinter(hPrinter)
-                    print(f"Sent {len(raw_data)} bytes of RAW/ZPL data directly to {printer_uid}")
-                finally:
-                    win32print.ClosePrinter(hPrinter)
-            except ImportError:
-                print("win32print module missing. Raw printing may not be fully supported without it.")
-                raise RuntimeError("win32print is required for Windows raw printing")
-                
-    except Exception as e:
-        print(f"Failed to print RAW to {printer_uid}: {e}")
-        raise e
-
-
-import threading
-from PIL import Image, ImageDraw
-import pystray
-import webbrowser
-
-# ... config ...
-
-# Redirect print to log file since we have no console
+# Lazy-loaded Logger
 class Logger(object):
     def __init__(self):
         self.terminal = sys.stdout
-        log_path = os.path.join(application_path, "agent.log")
-        self.log = open(log_path, "a", encoding='utf-8')
+        try:
+            self.log = open(log_path, "a", encoding='utf-8')
+        except:
+            self.log = None
 
     def write(self, message):
-        # self.terminal.write(message) # Uncomment if debugging with console
-        try:
-            self.log.write(message)
-            self.log.flush()
-        except:
-            pass
+        if self.log:
+            try:
+                self.log.write(message)
+                self.log.flush()
+            except: pass
 
     def flush(self):
-        #self.terminal.flush()
-        self.log.flush()
-
-# Apply logger if not in dev (console) mode, or just always for safety in GUI mode
-if not os.environ.get('AGENT_CONSOLE_DEBUG'):
-    sys.stdout = Logger()
-    sys.stderr = sys.stdout
+        if self.log: self.log.flush()
 
 def load_logo():
-    """
-    Loads the official agent_logo.png from the bundled resources.
-    Falls back to a simple blue dot if not found.
-    """
+    from PIL import Image
     logo_path = None
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        # Running as a bundled EXE
         logo_path = os.path.join(sys._MEIPASS, 'agent_logo.png')
     else:
-        # Running in dev mode
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_logo.png')
+        logo_path = os.path.join(application_path, 'agent_logo.png')
 
     if logo_path and os.path.exists(logo_path):
+        try: return Image.open(logo_path)
+        except: pass
+    return Image.new('RGB', (64, 64), (34, 113, 177))
+
+def print_pdf(content_base64, printer_name):
+    import base64
+    import tempfile
+    import win32print
+    
+    pdf_data = base64.b64decode(content_base64)
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(pdf_data)
+        temp_path = f.name
+
+    try:
+        if platform.system() == "Windows":
+            # Attempt SumatraPDF (Premium rendering)
+            sumatra_path = os.path.join(application_path, "SumatraPDF.exe")
+            if os.path.exists(sumatra_path):
+                # Using 'noscale' to prevent extra blank pages on 4x6 labels
+                # Using 'fit' for standard reports
+                subprocess.run([sumatra_path, "-print-to", printer_name, "-print-settings", "fit,noscale", temp_path], check=True)
+            else:
+                # Fallback to standard ShellExecute
+                win32api.ShellExecute(0, "print", temp_path, f'/d:"{printer_name}"', ".", 0)
+    finally:
+        try: os.unlink(temp_path)
+        except: pass
+
+def print_raw(content_base64, printer_name):
+    import base64
+    import win32print
+    
+    # Strip any trailing whitespace or command delimiters that cause blank pages
+    raw_data = base64.b64decode(content_base64).strip(b"\r\n\x00 ")
+    
+    hPrinter = win32print.OpenPrinter(printer_name)
+    try:
+        # RAW mode implies we send control characters directly. 
+        # Redundant StartPagePrinter calls often trigger extra form-feeds on thermal printers.
+        win32print.StartDocPrinter(hPrinter, 1, ("Cloud Print Job", None, "RAW"))
         try:
-            return Image.open(logo_path)
-        except Exception as e:
-            print(f"Error loading logo: {e}")
-            
-    # Fallback to Odoo-blue dot
-    image = Image.new('RGB', (64, 64), (34, 113, 177))
-    return image
+            win32print.WritePrinter(hPrinter, raw_data)
+        finally:
+            win32print.EndDocPrinter(hPrinter)
+    finally:
+        win32print.ClosePrinter(hPrinter)
 
+def update_status(icon, message, tooltip=None):
+    # This might be called from background thread
+    def _update():
+        icon.menu = pystray.Menu(
+            pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
+            pystray.MenuItem("Status: " + message, lambda i, item: None, enabled=False),
+            pystray.MenuItem("View Log", on_open_log),
+            pystray.MenuItem("Edit Config", on_open_config),
+            pystray.MenuItem("Exit", on_exit)
+        )
+        if tooltip:
+            icon.title = f"Cloud Print Agent ({SERVER_ID}) - {tooltip}"
+        else:
+            icon.title = f"Cloud Print Agent ({SERVER_ID})"
+    
+    # Actually pystray doesn't need thread-safe menu updates, but good practice
+    _update()
 
-def show_notification(icon, message, title="Cloud Print Agent"):
-    """Show a notification. Uses pystray first, falls back to MessageBox."""
+def get_printer_properties(printer_name):
+    import win32print
     try:
-        icon.notify(message, title)
-    except Exception:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            # Level 2 has the DevMode structure
+            info = win32print.GetPrinter(hPrinter, 2)
+            dm = info['pDevMode']
+            if dm:
+                return {
+                    "orientation": "landscape" if dm.Orientation == 2 else "portrait",
+                    "paper_size": str(dm.PaperSize),
+                    "copies": dm.Copies,
+                    "color": "color" if dm.Color == 2 else "monochrome",
+                    "duplex": "duplex" if dm.Duplex > 1 else "simplex",
+                    "location": info.get('pLocation', ''),
+                    "comment": info.get('pComment', '')
+                }
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except:
         pass
-    # Also show a brief toast via ctypes as backup
-    try:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(0, message, title, 0x40 | 0x40000)
-        # 0x40 = MB_ICONINFORMATION, 0x40000 = MB_TOPMOST
-    except Exception:
-        pass
-
-
-# Dynamic Status
-AGENT_STATUS = "Offline"
-
-def update_status(icon, status, notify_msg=None):
-    global AGENT_STATUS
-    if AGENT_STATUS == status:
-        return
-    
-    AGENT_STATUS = status
-    print(f"Status changed: {status}")
-    
-    # 1. Update Tooltip
-    icon.title = f"Cloud Print Agent ({status}) - {SERVER_ID}"
-    
-    # 2. Re-create Menu to refresh text
-    # Note: We duplicate the labels here. 
-    icon.menu = pystray.Menu(
-        pystray.MenuItem(f"Server ID: {SERVER_ID}", lambda i, item: None, enabled=False),
-        pystray.MenuItem(f"Status: {AGENT_STATUS}", lambda i, item: None, enabled=False),
-        pystray.MenuItem("View Log", on_open_log),
-        pystray.MenuItem("Edit Config", on_open_config),
-        pystray.MenuItem("Exit", on_exit)
-    )
-    
-    # 3. Notification for errors
-    if notify_msg:
-        show_notification(icon, notify_msg, f"Agent {status}")
+    return {}
 
 def run_agent_loop(icon):
-    # Give the icon a moment to fully initialize before sending notifications
-    time.sleep(3)
+    import requests
+    import win32print
+    import getpass
     
-    if STARTUP_ERROR == "setup_needed":
-        update_status(icon, "Setup Needed")
-        show_notification(
-            icon,
-            "Welcome to Cloud Print Agent!\n\n"
-            "To get started:\n"
-            "1. Right-click the tray icon\n"
-            "2. Click 'Edit Config'\n"
-            "3. Add your License Key\n"
-            "4. Restart the agent",
-            "Setup Required"
-        )
-        return
-    elif STARTUP_ERROR:
-        update_status(icon, "Config Error")
-        show_notification(icon, STARTUP_ERROR, "Cloud Print Agent")
-        return
-
-    update_status(icon, "Started", f"Cloud Print Agent is active.\nServer: {SERVER_ID}")
-    
-    # Initial Discovery
+    # 1. Initial Discovery
     try:
-        discovered_printers = get_printers()
         if DEV_MODE:
-            discovered_printers.append({"os_id": "DEV_PDF", "name": "Dev PDF Printer", "status": "Normal"})
-            
-        if discovered_printers:
-            print(f"Discovered: {len(discovered_printers)} printers.")
-            try:
-                payload = {
-                    "printers": discovered_printers, 
-                    "server_uid": SERVER_ID,
-                    "os_user": getpass.getuser()
-                }
-                response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=10)
-                
-                if response.status_code == 401:
-                    update_status(icon, "Invalid Key", "Access Denied: The license key is invalid.")
-                elif response.status_code == 403:
-                    update_status(icon, "Limit Reached", "Access Denied: Plan limit reached (Max print servers).")
-                elif response.status_code == 200:
-                    update_status(icon, "Online")
-                else:
-                    update_status(icon, f"Error {response.status_code}")
-                
-                response.raise_for_status()
-            except Exception as e:
-                print(f"Sync Failed: {e}")
-                update_status(icon, "Offline")
-    except Exception as e:
-        print(f"Startup Failed: {e}")
-        update_status(icon, "Critical Error")
+            discovered_printers = [{
+                "uid": "simulated-printer", 
+                "name": "Simulated Label Printer", 
+                "status": "online",
+                "properties": {"orientation": "portrait", "color": "monochrome", "duplex": "simplex"}
+            }]
+        else:
+            printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+            discovered_printers = []
+            for p in printers:
+                name = p[2]
+                props = get_printer_properties(name)
+                discovered_printers.append({
+                    "uid": name,
+                    "name": name,
+                    "status": "online",
+                    "properties": props
+                })
 
-    # Main Loop
-    while True:
-        if not icon.visible:
-            break # Stop if icon hidden (exit)
-            
+        payload = {"printers": discovered_printers, "server_uid": SERVER_ID, "os_user": getpass.getuser()}
+        response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=10)
+        if response.status_code == 200: update_status(icon, "Online")
+        else: update_status(icon, f"Error {response.status_code}")
+    except Exception as e:
+        update_status(icon, "Offline")
+
+    # 2. Main Polling Loop
+    while icon.visible:
         try:
             response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS, timeout=10)
-            
-            if response.status_code == 401:
-                 update_status(icon, "Invalid Key", "Access Denied: The license key is invalid or has been revoked.")
-                 time.sleep(60)
-                 continue
-            elif response.status_code == 403:
-                 update_status(icon, "Limit Reached", "Access Denied: Your subscription limit has been reached.")
-                 time.sleep(60)
-                 continue
-            elif response.status_code == 200:
-                 update_status(icon, "Online")
-            else:
-                 update_status(icon, f"Error {response.status_code}")
-
-            response.raise_for_status()
-            job = response.json()
-            
-            if job:
-                print(f"Received Job: {job.get('job_id')}")
-                icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
-                try:
-                    job_format = job.get("format", "pdf")
-                    if job_format in ["raw", "zpl"]:
-                        print_raw(job["content"], job["printer_uid"])
-                    else:
-                        print_pdf(job["content"], job["printer_uid"])
-                        
-                    requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
-                except Exception as e:
-                    print(f"Printing failed: {e}")
-                    requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
-        except Exception as e:
-            # print(f"Polling error: {e}") # Too spammy if offline
-            pass
-            
+            if response.status_code == 200:
+                update_status(icon, "Online")
+                job = response.json()
+                if job:
+                    icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
+                    try:
+                        if job.get("format") in ["raw", "zpl"]:
+                            print_raw(job["content"], job["printer_uid"])
+                        else:
+                            print_pdf(job["content"], job["printer_uid"])
+                        requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
+                    except Exception as e:
+                        requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
+        except: pass
         time.sleep(5)
 
 def on_open_log(icon, item):
-    log_path = os.path.join(application_path, "agent.log")
-    if os.path.exists(log_path):
-        os.startfile(log_path)
+    if os.path.exists(log_path): os.startfile(log_path)
 
 def on_open_config(icon, item):
-    if os.path.exists(config_file):
-        os.startfile(config_file)
-    else:
-        # Create default
-        with open(config_file, "w") as f:
-            f.write(f"[General]\napi={API_DEFAULT}\nlicense_key=\nauto_start=True\n")
-        os.startfile(config_file)
+    if os.path.exists(config_file): os.startfile(config_file)
 
 def on_exit(icon, item):
     icon.visible = False
     icon.stop()
     sys.exit(0)
 
-# ... (previous code) ...
-
-# Main Execution wrapper for Cython
 def run():
-    if platform.system() == "Windows":
-        mutex_name = f"Global\\OdooPrintAgent_{SERVER_ID}"
-        mutex = win32event.CreateMutex(None, False, mutex_name)
-        if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
-            sys.exit(0)
-            
-        # Startup Registration
-        if AUTO_START:
-            set_run_at_startup("OdooPrintAgent", action="install")
-        else:
-            set_run_at_startup("OdooPrintAgent", action="remove")
+    global API, LICENSE_KEY, SERVER_ID, HEADERS, AUTO_START, STARTUP_ERROR, DEV_MODE, pystray
+    
+    # 0. Single Instance Check (Instant!)
+    m_name = f"Global\\OdooPrintAgent_v2" # Using V2 to isolate from old slow instances
+    mutex = win32event.CreateMutex(None, False, m_name)
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        sys.exit(0)
 
-    # GUI Mode Main Entry
+    # 1. Deferred Heavy Imports
+    import argparse
+    import configparser
+    import uuid
+    import hashlib
+    import getpass
+    import threading
+    import pystray
+    
+    # 2. Load Config
+    config = configparser.ConfigParser()
+    if os.path.exists(config_file):
+        try: config.read(config_file)
+        except: pass
+    
+    API_DEFAULT = config['General'].get('api', "http://localhost:8019") if 'General' in config else "http://localhost:8019"
+    LICENSE_KEY_DEFAULT = config['General'].get('license_key', "") if 'General' in config else ""
+    SERVER_ID_DEFAULT = config['General'].get('server_id', "") if 'General' in config else ""
+    DEV_MODE = config['General'].getboolean('dev_mode', False) if 'General' in config else False
+    AUTO_START = config['General'].getboolean('auto_start', True) if 'General' in config else True
+    
+    # 3. Parse Args
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--api', default=API_DEFAULT)
+    parser.add_argument('--license-key', default=LICENSE_KEY_DEFAULT)
+    parser.add_argument('--server-id', default=SERVER_ID_DEFAULT)
+    parser.add_argument('--dev', action='store_true', default=DEV_MODE)
+    args, _ = parser.parse_known_args()
+    
+    API = args.api
+    LICENSE_KEY = args.license_key
+    DEV_MODE = args.dev
+    
+    # 4. Finalize Identity
+    if not LICENSE_KEY:
+        STARTUP_ERROR = "setup_needed"
+        SERVER_ID = "NewSetup"
+    else:
+        mac = uuid.getnode()
+        SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY, mac)
+        HEADERS = {"X-License-Key": LICENSE_KEY, "X-Server-ID": SERVER_ID, "X-OS-User": getpass.getuser()}
+
+    # 5. Redirect Logs
+    if not os.environ.get('AGENT_CONSOLE_DEBUG'):
+        sys.stdout = Logger()
+        sys.stderr = sys.stdout
+
+    # 6. Startup Registration
+    if platform.system() == "Windows":
+        set_run_at_startup("OdooPrintAgent", action="install" if AUTO_START else "remove")
+
+    # 7. Start GUI (Almost Instant)
     icon = pystray.Icon("CloudPrintAgent")
     icon.menu = pystray.Menu(
         pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
-        pystray.MenuItem("Status: Online", lambda i, item: None, enabled=False),
+        pystray.MenuItem("Status: Initializing...", lambda i, item: None, enabled=False),
         pystray.MenuItem("View Log", on_open_log),
         pystray.MenuItem("Edit Config", on_open_config),
         pystray.MenuItem("Exit", on_exit)
     )
     icon.icon = load_logo()
-    icon.title = f"Cloud Print Agent ({SERVER_ID})"
+    icon.title = f"Cloud Printing Agent"
     
-    # Start Agent Thread
-    t = threading.Thread(target=run_agent_loop, args=(icon,), daemon=True)
-    t.start()
-    
-    # Run UI (Blocking) — this is the ONLY call to start the icon
+    threading.Thread(target=run_agent_loop, args=(icon,), daemon=True).start()
     icon.run()
-
 
 if __name__ == '__main__':
     run()
-
