@@ -27,6 +27,11 @@ else:
 config_file = os.path.join(application_path, 'agent.ini')
 log_path = os.path.join(application_path, 'agent.log')
 
+def generate_server_id(license_key, mac):
+    import hashlib
+    unique_str = f"{mac}-{license_key}"
+    return "server-" + hashlib.md5(unique_str.encode()).hexdigest()[:8]
+
 def set_run_at_startup(app_name, action="install"):
     if platform.system() != "Windows": return False
     registry_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
