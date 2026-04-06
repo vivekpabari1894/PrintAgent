@@ -18,14 +18,19 @@ HEADERS = {}
 STARTUP_ERROR = None
 DEV_MODE = False
 
-# Application Paths (Safe to keep at top level as they use fast os/sys)
-if getattr(sys, 'frozen', False):
-    application_path = os.path.dirname(sys.executable)
-else:
-    application_path = os.path.dirname(os.path.abspath(__file__))
+# Application Paths (Safe placeholders)
+application_path = ""
+config_file = ""
+log_path = ""
 
-config_file = os.path.join(application_path, 'agent.ini')
-log_path = os.path.join(application_path, 'agent.log')
+def init_paths():
+    global application_path, config_file, log_path
+    if getattr(sys, 'frozen', False):
+        application_path = os.path.dirname(sys.executable)
+    else:
+        application_path = os.path.dirname(os.path.abspath(__file__))
+    config_file = os.path.join(application_path, 'agent.ini')
+    log_path = os.path.join(application_path, 'agent.log')
 
 def generate_server_id(license_key, mac):
     import hashlib
@@ -55,12 +60,13 @@ def set_run_at_startup(app_name, action="install"):
 class Logger(object):
     def __init__(self):
         self.terminal = sys.stdout
-        try:
-            self.log = open(log_path, "a", encoding='utf-8')
-        except:
-            self.log = None
+        self.log = None
 
     def write(self, message):
+        if not self.log and log_path:
+            try: self.log = open(log_path, "a", encoding='utf-8')
+            except: pass
+        
         if self.log:
             try:
                 self.log.write(message)
@@ -238,10 +244,12 @@ def run():
     global API, LICENSE_KEY, SERVER_ID, HEADERS, AUTO_START, STARTUP_ERROR, DEV_MODE, pystray
     
     # 0. Single Instance Check (Instant!)
-    m_name = f"Global\\OdooPrintAgent_v2" # Using V2 to isolate from old slow instances
+    m_name = f"Global\\OdooPrintAgent_v2" 
     mutex = win32event.CreateMutex(None, False, m_name)
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         sys.exit(0)
+
+    init_paths()
 
     # 1. Deferred Heavy Imports
     import argparse
