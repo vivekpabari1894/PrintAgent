@@ -89,7 +89,7 @@ def load_logo():
         except: pass
     return Image.new('RGB', (64, 64), (34, 113, 177))
 
-def print_pdf(content_base64, printer_name):
+def print_pdf(content_base64, printer_name, orientation='portrait'):
     import base64
     import tempfile
     import win32print
@@ -106,7 +106,8 @@ def print_pdf(content_base64, printer_name):
             if os.path.exists(sumatra_path):
                 # Using 'noscale' to prevent extra blank pages on 4x6 labels
                 # Using 'fit' for standard reports
-                subprocess.run([sumatra_path, "-print-to", printer_name, "-print-settings", "fit,noscale", temp_path], check=True)
+                settings = f"fit,noscale,{orientation}"
+                subprocess.run([sumatra_path, "-print-to", printer_name, "-print-settings", settings, temp_path], check=True)
             else:
                 # Fallback to standard ShellExecute
                 win32api.ShellExecute(0, "print", temp_path, f'/d:"{printer_name}"', ".", 0)
@@ -222,7 +223,7 @@ def run_agent_loop(icon):
                         if job.get("format") in ["raw", "zpl"]:
                             print_raw(job["content"], job["printer_uid"])
                         else:
-                            print_pdf(job["content"], job["printer_uid"])
+                            print_pdf(job["content"], job["printer_uid"], job.get("orientation", "portrait"))
                         requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
                     except Exception as e:
                         requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
