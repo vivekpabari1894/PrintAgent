@@ -89,7 +89,7 @@ def load_logo():
         except: pass
     return Image.new('RGB', (64, 64), (34, 113, 177))
 
-def print_pdf(content_base64, printer_name, orientation='portrait'):
+def print_pdf(content_base64, printer_name, orientation='portrait', color_mode=None, duplex_mode=None, paper_size=None):
     import base64
     import tempfile
     import win32print
@@ -104,9 +104,16 @@ def print_pdf(content_base64, printer_name, orientation='portrait'):
             # Attempt SumatraPDF (Premium rendering)
             sumatra_path = os.path.join(application_path, "SumatraPDF.exe")
             if os.path.exists(sumatra_path):
-                # Using 'noscale' to prevent extra blank pages on 4x6 labels
-                # Using 'fit' for standard reports
-                settings = f"fit,noscale,{orientation}"
+                # Build settings string based on orientation and other preferences
+                settings_list = ["fit", "noscale", orientation]
+                if color_mode: settings_list.append(color_mode)
+                if duplex_mode: 
+                    # Map Odoo duplex names to SumatraPDF flags if needed
+                    sd_duplex = "duplexlong" if duplex_mode == "duplex" else "simplex"
+                    settings_list.append(sd_duplex)
+                if paper_size: settings_list.append(f"paper={paper_size}")
+                
+                settings = ",".join(settings_list)
                 subprocess.run([sumatra_path, "-print-to", printer_name, "-print-settings", settings, temp_path], check=True)
             else:
                 # Fallback to standard ShellExecute
@@ -157,19 +164,53 @@ def get_printer_properties(printer_name):
     try:
         hPrinter = win32print.OpenPrinter(printer_name)
         try:
-            # Level 2 has the DevMode structure
+            # 1. Get Basic Info & Current Defaults
             info = win32print.GetPrinter(hPrinter, 2)
             dm = info['pDevMode']
+            res = {
+                "orientation": "portrait",
+                "paper_size": "unknown",
+                "copies": 1,
+                "color": "monochrome",
+                "duplex": "simplex",
+                "location": info.get('pLocation', ''),
+                "comment": info.get('pComment', ''),
+                "has_color": False,
+                "supported_papers": [],
+                "supported_bins": []
+            }
             if dm:
-                return {
+                res.update({
                     "orientation": "landscape" if dm.Orientation == 2 else "portrait",
                     "paper_size": str(dm.PaperSize),
                     "copies": dm.Copies,
                     "color": "color" if dm.Color == 2 else "monochrome",
                     "duplex": "duplex" if dm.Duplex > 1 else "simplex",
-                    "location": info.get('pLocation', ''),
-                    "comment": info.get('pComment', '')
-                }
+                })
+
+            # 2. Scan Device Capabilities (The "Menu" of options)
+            # DC_COLORDEVICE returns 1 if hardware supports color
+            try:
+                res["has_color"] = win32print.DeviceCapabilities(printer_name, "", win32print.DC_COLORDEVICE) > 0
+            except: pass
+
+            # DC_PAPERNAMES returns a list of supported paper names
+            try:
+                papers = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERNAMES)
+                if papers:
+                    # Clean up strings (they are often null-padded)
+                    res["supported_papers"] = [p.strip("\x00") for p in papers if p.strip("\x00")]
+            except: pass
+
+            # DC_BINNAMES returns a list of supported input bins
+            try:
+                bins = win32print.DeviceCapabilities(printer_name, "", win32print.DC_BINNAMES)
+                if bins:
+                    res["supported_bins"] = [b.strip("\x00") for b in bins if b.strip("\x00")]
+            except: pass
+
+            return res
+
         finally:
             win32print.ClosePrinter(hPrinter)
     except:
@@ -223,7 +264,14 @@ def run_agent_loop(icon):
                         if job.get("format") in ["raw", "zpl"]:
                             print_raw(job["content"], job["printer_uid"])
                         else:
-                            print_pdf(job["content"], job["printer_uid"], job.get("orientation", "portrait"))
+                            print_pdf(
+                                job["content"], 
+                                job["printer_uid"], 
+                                orientation=job.get("orientation", "portrait"),
+                                color_mode=job.get("color_mode"),
+                                duplex_mode=job.get("duplex_mode"),
+                                paper_size=job.get("paper_size")
+                            )
                         requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
                     except Exception as e:
                         requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
