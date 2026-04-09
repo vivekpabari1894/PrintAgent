@@ -13,7 +13,7 @@ import uuid
 import getpass
 import threading
 import logging
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
 # Windows Specific Imports
 import win32event
@@ -96,16 +96,17 @@ def setup_logging():
     global log_path
     if not log_path: return
     
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # Standardized format with fixed-width columns for better alignment
+    formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s')
     
-    # Rotation: 5MB per file, keep 5 backups
-    handler = RotatingFileHandler(log_path, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8')
+    # Rotation: Daily at midnight, keep 7 days
+    handler = TimedRotatingFileHandler(log_path, when='midnight', interval=1, backupCount=7, encoding='utf-8')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     
     # Also log to console if not redirected
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
+    # console_handler = logging.StreamHandler(sys.stdout)
+    # console_handler.setFormatter(formatter)
     # logger.addHandler(console_handler) 
 
     # Redirect stdout/stderr so print() calls go to log file
@@ -355,6 +356,20 @@ def get_all_presets(printer_name):
 
     return presets
 
+def upload_logs():
+    try:
+        if os.path.exists(log_path):
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                # Send the last 1000 lines to avoid excessive data but provide enough context
+                lines = content.splitlines()
+                header = f"--- REMOTE LOG DUMP (Server: {SERVER_ID}) ---\n--- Showing last {min(len(lines), 1000)} lines ---\n\n"
+                summary = header + "\n".join(lines[-1000:])
+                requests.post(f"{API}/api/agent/upload_logs", json={"logs": summary}, headers=HEADERS, timeout=20)
+                logger.info("Diagnostic logs uploaded to SaaS successfully.")
+    except Exception as e:
+        logger.error(f"Failed to upload logs: {e}")
+
 def run_agent_loop(icon):
     # 1. Initial Discovery
     try:
@@ -410,30 +425,37 @@ def run_agent_loop(icon):
             response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS, timeout=10)
             if response.status_code == 200:
                 update_status(icon, "Online")
-                job = response.json()
-                if job:
-                    logger.info(f"New job received: {job.get('job_id')} for {job.get('printer_uid')}")
-                    icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
-                    try:
-                        if job.get("format") in ["raw", "zpl"]:
-                            logger.info(f"Processing RAW/ZPL job...")
-                            print_raw(job["content"], job["printer_uid"])
-                        else:
-                            logger.info(f"Processing PDF job: Orientation={job.get('orientation')}, Bin={job.get('bin_name')}")
-                            print_pdf(
-                                job["content"], 
-                                job["printer_uid"], 
-                                orientation=job.get("orientation", "portrait"),
-                                color_mode=job.get("color_mode"),
-                                duplex_mode=job.get("duplex_mode"),
-                                paper_size=job.get("paper_size"),
-                                bin_name=job.get("bin_name")
-                            )
-                        requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
-                        logger.info(f"Job {job.get('job_id')} completed and reported")
-                    except Exception as e:
-                        logger.error(f"Job execution failed: {e}")
-                        requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
+                data = response.json()
+                if data:
+                    # Check for remote log request
+                    if data.get('send_logs'):
+                        threading.Thread(target=upload_logs, daemon=True).start()
+
+                    # Only process if there's an actual job
+                    if data.get('job_id'):
+                        job = data
+                        logger.info(f"New job received: {job.get('job_id')} for {job.get('printer_uid')}")
+                        icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
+                        try:
+                            if job.get("format") in ["raw", "zpl"]:
+                                logger.info(f"Processing RAW/ZPL job...")
+                                print_raw(job["content"], job["printer_uid"])
+                            else:
+                                logger.info(f"Processing PDF job: Orientation={job.get('orientation')}, Bin={job.get('bin_name')}")
+                                print_pdf(
+                                    job["content"], 
+                                    job["printer_uid"], 
+                                    orientation=job.get("orientation", "portrait"),
+                                    color_mode=job.get("color_mode"),
+                                    duplex_mode=job.get("duplex_mode"),
+                                    paper_size=job.get("paper_size"),
+                                    bin_name=job.get("bin_name")
+                                )
+                            requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
+                            logger.info(f"Job {job.get('job_id')} completed and reported")
+                        except Exception as e:
+                            logger.error(f"Job execution failed: {e}")
+                            requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
             elif response.status_code != 204: # 204 No Content is normal
                 logger.warning(f"Unexpected polling response: HTTP {response.status_code}")
         except Exception as e: 
