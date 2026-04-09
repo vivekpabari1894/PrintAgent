@@ -26,6 +26,7 @@ import win32print
 import requests
 import pystray
 from PIL import Image
+import shutil
 
 # Global variables (initialized in run())
 API = ""
@@ -134,9 +135,33 @@ def print_pdf(content_base64, printer_name, orientation='portrait', color_mode=N
     try:
         logger.info(f"Starting print job for printer: {printer_name}")
         if platform.system() == "Windows":
-            # Attempt SumatraPDF (Premium rendering)
-            sumatra_path = os.path.join(application_path, "SumatraPDF.exe")
-            if os.path.exists(sumatra_path):
+            # Smart Discovery for SumatraPDF
+            sumatra_path = None
+            search_locations = []
+            
+            # 1. Check if bundled inside PyInstaller EXE (_MEIPASS)
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                search_locations.append(os.path.join(sys._MEIPASS, "SumatraPDF.exe"))
+                
+            # 2. Check locally next to the EXE
+            search_locations.append(os.path.join(application_path, "SumatraPDF.exe"))
+            
+            # 3. Check System PATH
+            sys_exe = shutil.which("SumatraPDF.exe")
+            if sys_exe: search_locations.append(sys_exe)
+            
+            # 4. Common Program Files
+            search_locations.extend([
+                r"C:\Program Files\SumatraPDF\SumatraPDF.exe",
+                r"C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe"
+            ])
+
+            for p in search_locations:
+                if p and os.path.exists(p):
+                    sumatra_path = p
+                    break
+
+            if sumatra_path:
                 # Build settings string based on orientation and other preferences
                 settings_list = ["fit", "noscale", orientation]
                 if color_mode: settings_list.append(color_mode)
@@ -147,11 +172,11 @@ def print_pdf(content_base64, printer_name, orientation='portrait', color_mode=N
                 if bin_name: settings_list.append(f"bin={bin_name}")
                 
                 settings = ",".join(settings_list)
-                logger.info(f"Executing SumatraPDF: -print-to \"{printer_name}\" -print-settings \"{settings}\"")
+                logger.info(f"Executing SumatraPDF ({sumatra_path}): -print-to \"{printer_name}\" -print-settings \"{settings}\"")
                 subprocess.run([sumatra_path, "-print-to", printer_name, "-print-settings", settings, temp_path], check=True)
                 logger.info("Job successfully sent to SumatraPDF")
             else:
-                logger.warning(f"SumatraPDF not found at {sumatra_path}, falling back to ShellExecute")
+                logger.warning("SumatraPDF not found in bundle, local dir or PATH. Falling back to ShellExecute (Simple Printing).")
                 win32api.ShellExecute(0, "print", temp_path, f'/d:"{printer_name}"', ".", 0)
                 logger.info("Job sent via ShellExecute")
     except Exception as e:
