@@ -35,7 +35,12 @@ AUTO_START = True
 HEADERS = {}
 STARTUP_ERROR = None
 DEV_MODE = False
-
+DC_PAPERS       = 2
+DC_PAPERSIZE    = 3
+DC_PAPERNAMES   = 16
+DC_BINNAMES     = 12
+DC_BINS         = 6
+DC_COLORDEVICE  = 32
 # Application Paths (Safe placeholders)
 application_path = ""
 config_file = ""
@@ -223,14 +228,14 @@ def get_printer_properties(printer_name):
             # 2. Scan Device Capabilities (The "Menu" of options)
             # DC_COLORDEVICE returns 1 if hardware supports color
             try:
-                res["has_color"] = win32print.DeviceCapabilities(printer_name, "", win32print.DC_COLORDEVICE) > 0
+                res["has_color"] = win32print.DeviceCapabilities(printer_name, "", DC_COLORDEVICE) > 0
                 logger.info(f"  - Hardware Color Support: {res['has_color']}")
             except Exception as e:
                 logger.warning(f"  - Failed to scan and check color support: {e}")
 
             # DC_PAPERNAMES returns a list of supported paper names
             try:
-                papers = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERNAMES)
+                papers = win32print.DeviceCapabilities(printer_name, "", DC_PAPERNAMES)
                 if papers:
                     # Clean up strings (they are often null-padded)
                     res["supported_papers"] = [p.strip("\x00") for p in papers if p.strip("\x00")]
@@ -240,7 +245,7 @@ def get_printer_properties(printer_name):
 
             # DC_BINNAMES returns a list of supported input bins
             try:
-                bins = win32print.DeviceCapabilities(printer_name, "", win32print.DC_BINNAMES)
+                bins = win32print.DeviceCapabilities(printer_name, "", DC_BINNAMES)
                 if bins:
                     res["supported_bins"] = [b.strip("\x00") for b in bins if b.strip("\x00")]
                 logger.info(f"  - Found {len(res['supported_bins'])} Input Trays: {', '.join(res['supported_bins'])}")
@@ -262,11 +267,11 @@ def get_all_presets(printer_name):
         hPrinter = win32print.OpenPrinter(printer_name)
         try:
             # Get paper names + sizes + bins
-            paper_names  = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERNAMES)
-            paper_sizes  = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERS)
-            paper_dims   = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERSIZE)
-            bin_names    = win32print.DeviceCapabilities(printer_name, "", win32print.DC_BINNAMES)
-            bin_ids      = win32print.DeviceCapabilities(printer_name, "", win32print.DC_BINS)
+            paper_names  = win32print.DeviceCapabilities(printer_name, "", DC_PAPERNAMES)
+            paper_sizes  = win32print.DeviceCapabilities(printer_name, "", DC_PAPERS)
+            paper_dims   = win32print.DeviceCapabilities(printer_name, "", DC_PAPERSIZE)
+            bin_names    = win32print.DeviceCapabilities(printer_name, "", DC_BINNAMES)
+            bin_ids      = win32print.DeviceCapabilities(printer_name, "", DC_BINS)
 
             # Build paper presets
             if paper_names and paper_sizes:
