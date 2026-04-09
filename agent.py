@@ -75,7 +75,7 @@ def set_run_at_startup(app_name, action="install"):
         reg.CloseKey(key)
         return True
     except Exception as e:
-        print(f"Failed to manage startup registry: {e}")
+        logger.info(f"Failed to manage startup registry: {e}")
         return False
 
 # Proper Logging Setup
@@ -109,7 +109,7 @@ def setup_logging():
     # console_handler.setFormatter(formatter)
     # logger.addHandler(console_handler) 
 
-    # Redirect stdout/stderr so print() calls go to log file
+    # Redirect stdout/stderr so logger.info() calls go to log file
     sys.stdout = StdoutToLogger(logger, logging.INFO)
     sys.stderr = StdoutToLogger(logger, logging.ERROR)
 
@@ -356,17 +356,21 @@ def get_all_presets(printer_name):
 
     return presets
 
-def upload_logs():
+def upload_logs(line_count=100):
     try:
         if os.path.exists(log_path):
             with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
-                # Send the last 1000 lines to avoid excessive data but provide enough context
                 lines = content.splitlines()
-                header = f"--- REMOTE LOG DUMP (Server: {SERVER_ID}) ---\n--- Showing last {min(len(lines), 1000)} lines ---\n\n"
-                summary = header + "\n".join(lines[-1000:])
+                
+                # Fetch specified number of lines, or 0 for full log
+                target_lines = lines if line_count == 0 else lines[-abs(line_count):]
+                
+                header = f"--- REMOTE LOG DUMP (Server: {SERVER_ID}) ---\n"
+                header += f"--- Range: {'Full Log' if line_count == 0 else f'Last {len(target_lines)} lines'} ---\n\n"
+                
+                summary = header + "\n".join(target_lines)
                 requests.post(f"{API}/api/agent/upload_logs", json={"logs": summary}, headers=HEADERS, timeout=20)
-                logger.info("Diagnostic logs uploaded to SaaS successfully.")
     except Exception as e:
         logger.error(f"Failed to upload logs: {e}")
 
@@ -429,7 +433,8 @@ def run_agent_loop(icon):
                 if data:
                     # Check for remote log request
                     if data.get('send_logs'):
-                        threading.Thread(target=upload_logs, daemon=True).start()
+                        lines_to_get = data.get('log_lines', 100)
+                        threading.Thread(target=upload_logs, args=(lines_to_get,), daemon=True).start()
 
                     # Only process if there's an actual job
                     if data.get('job_id'):
@@ -525,7 +530,7 @@ def run():
         logger.info(f"OS: {platform.system()} {platform.version()}")
         logger.info(f"User: {getpass.getuser()}")
     else:
-        print("Skipping file logging (AGENT_CONSOLE_DEBUG is set)")
+        logger.info("Skipping file logging (AGENT_CONSOLE_DEBUG is set)")
 
     # 5. Startup Registration
     if platform.system() == "Windows":
