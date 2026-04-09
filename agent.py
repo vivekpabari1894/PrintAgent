@@ -4,10 +4,28 @@ import subprocess
 import os
 import ctypes
 import sys
+import hashlib
+import base64
+import tempfile
+import argparse
+import configparser
+import uuid
+import getpass
+import threading
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Windows Specific Imports
 import win32event
 import win32api
 import winerror
 import winreg as reg
+import win32print
+
+# Third Party
+import requests
+import pystray
+from PIL import Image
 
 # Global variables (initialized in run())
 API = ""
@@ -33,7 +51,6 @@ def init_paths():
     log_path = os.path.join(application_path, 'agent.log')
 
 def generate_server_id(license_key, mac):
-    import hashlib
     unique_str = f"{mac}-{license_key}"
     return "server-" + hashlib.md5(unique_str.encode()).hexdigest()[:8]
 
@@ -56,28 +73,41 @@ def set_run_at_startup(app_name, action="install"):
         print(f"Failed to manage startup registry: {e}")
         return False
 
-# Lazy-loaded Logger
-class Logger(object):
-    def __init__(self):
-        self.terminal = sys.stdout
-        self.log = None
+# Proper Logging Setup
+logger = logging.getLogger("PrintAgent")
+logger.setLevel(logging.INFO)
 
+class StdoutToLogger(object):
+    def __init__(self, logger, level):
+        self.logger = logger
+        self.level = level
     def write(self, message):
-        if not self.log and log_path:
-            try: self.log = open(log_path, "a", encoding='utf-8')
-            except: pass
-        
-        if self.log:
-            try:
-                self.log.write(message)
-                self.log.flush()
-            except: pass
-
+        if message.rstrip():
+            self.logger.log(self.level, message.rstrip())
     def flush(self):
-        if self.log: self.log.flush()
+        pass
+
+def setup_logging():
+    global log_path
+    if not log_path: return
+    
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Rotation: 5MB per file, keep 5 backups
+    handler = RotatingFileHandler(log_path, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    
+    # Also log to console if not redirected
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    # logger.addHandler(console_handler) 
+
+    # Redirect stdout/stderr so print() calls go to log file
+    sys.stdout = StdoutToLogger(logger, logging.INFO)
+    sys.stderr = StdoutToLogger(logger, logging.ERROR)
 
 def load_logo():
-    from PIL import Image
     logo_path = None
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         logo_path = os.path.join(sys._MEIPASS, 'agent_logo.png')
@@ -89,17 +119,14 @@ def load_logo():
         except: pass
     return Image.new('RGB', (64, 64), (34, 113, 177))
 
-def print_pdf(content_base64, printer_name, orientation='portrait', color_mode=None, duplex_mode=None, paper_size=None):
-    import base64
-    import tempfile
-    import win32print
-    
+def print_pdf(content_base64, printer_name, orientation='portrait', color_mode=None, duplex_mode=None, paper_size=None, bin_name=None):
     pdf_data = base64.b64decode(content_base64)
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         f.write(pdf_data)
         temp_path = f.name
 
     try:
+        logger.info(f"Starting print job for printer: {printer_name}")
         if platform.system() == "Windows":
             # Attempt SumatraPDF (Premium rendering)
             sumatra_path = os.path.join(application_path, "SumatraPDF.exe")
@@ -108,24 +135,27 @@ def print_pdf(content_base64, printer_name, orientation='portrait', color_mode=N
                 settings_list = ["fit", "noscale", orientation]
                 if color_mode: settings_list.append(color_mode)
                 if duplex_mode: 
-                    # Map Odoo duplex names to SumatraPDF flags if needed
                     sd_duplex = "duplexlong" if duplex_mode == "duplex" else "simplex"
                     settings_list.append(sd_duplex)
                 if paper_size: settings_list.append(f"paper={paper_size}")
+                if bin_name: settings_list.append(f"bin={bin_name}")
                 
                 settings = ",".join(settings_list)
+                logger.info(f"Executing SumatraPDF: -print-to \"{printer_name}\" -print-settings \"{settings}\"")
                 subprocess.run([sumatra_path, "-print-to", printer_name, "-print-settings", settings, temp_path], check=True)
+                logger.info("Job successfully sent to SumatraPDF")
             else:
-                # Fallback to standard ShellExecute
+                logger.warning(f"SumatraPDF not found at {sumatra_path}, falling back to ShellExecute")
                 win32api.ShellExecute(0, "print", temp_path, f'/d:"{printer_name}"', ".", 0)
+                logger.info("Job sent via ShellExecute")
+    except Exception as e:
+        logger.error(f"ERROR in print_pdf: {e}")
+        raise e
     finally:
         try: os.unlink(temp_path)
         except: pass
 
 def print_raw(content_base64, printer_name):
-    import base64
-    import win32print
-    
     # Strip any trailing whitespace or command delimiters that cause blank pages
     raw_data = base64.b64decode(content_base64).strip(b"\r\n\x00 ")
     
@@ -160,8 +190,8 @@ def update_status(icon, message, tooltip=None):
     _update()
 
 def get_printer_properties(printer_name):
-    import win32print
     try:
+        logger.info(f"Scanning capabilities for printer: {printer_name}")
         hPrinter = win32print.OpenPrinter(printer_name)
         try:
             # 1. Get Basic Info & Current Defaults
@@ -187,12 +217,16 @@ def get_printer_properties(printer_name):
                     "color": "color" if dm.Color == 2 else "monochrome",
                     "duplex": "duplex" if dm.Duplex > 1 else "simplex",
                 })
+            
+            logger.info(f"  - Defaults: {res['orientation']}, {res['color']}, {res['duplex']}")
 
             # 2. Scan Device Capabilities (The "Menu" of options)
             # DC_COLORDEVICE returns 1 if hardware supports color
             try:
                 res["has_color"] = win32print.DeviceCapabilities(printer_name, "", win32print.DC_COLORDEVICE) > 0
-            except: pass
+                logger.info(f"  - Hardware Color Support: {res['has_color']}")
+            except Exception as e:
+                logger.warning(f"  - Failed to scan and check color support: {e}")
 
             # DC_PAPERNAMES returns a list of supported paper names
             try:
@@ -200,58 +234,135 @@ def get_printer_properties(printer_name):
                 if papers:
                     # Clean up strings (they are often null-padded)
                     res["supported_papers"] = [p.strip("\x00") for p in papers if p.strip("\x00")]
-            except: pass
+                logger.info(f"  - Found {len(res['supported_papers'])} Paper Sizes: {', '.join(res['supported_papers'][:3])}...")
+            except Exception as e:
+                logger.warning(f"  - Failed to scan paper sizes: {e}")
 
             # DC_BINNAMES returns a list of supported input bins
             try:
                 bins = win32print.DeviceCapabilities(printer_name, "", win32print.DC_BINNAMES)
                 if bins:
                     res["supported_bins"] = [b.strip("\x00") for b in bins if b.strip("\x00")]
-            except: pass
+                logger.info(f"  - Found {len(res['supported_bins'])} Input Trays: {', '.join(res['supported_bins'])}")
+            except Exception as e:
+                logger.warning(f"  - Failed to scan input trays: {e}")
 
             return res
 
         finally:
             win32print.ClosePrinter(hPrinter)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"ERROR scanning properties for {printer_name}: {e}")
     return {}
 
+def get_all_presets(printer_name):
+    """Get ALL available presets/paper sizes/bins for a printer"""
+    presets = []
+    try:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            # Get paper names + sizes + bins
+            paper_names  = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERNAMES)
+            paper_sizes  = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERS)
+            paper_dims   = win32print.DeviceCapabilities(printer_name, "", win32print.DC_PAPERSIZE)
+            bin_names    = win32print.DeviceCapabilities(printer_name, "", win32print.DC_BINNAMES)
+            bin_ids      = win32print.DeviceCapabilities(printer_name, "", win32print.DC_BINS)
+
+            # Build paper presets
+            if paper_names and paper_sizes:
+                for i, name in enumerate(paper_names):
+                    clean_name = name.strip("\x00").strip()
+                    if not clean_name:
+                        continue
+                    width_mm  = round(paper_dims[i][0] / 10, 1) if paper_dims else 0
+                    height_mm = round(paper_dims[i][1] / 10, 1) if paper_dims else 0
+                    presets.append({
+                        "printer_name" : printer_name,
+                        "preset_type"  : "paper",
+                        "name"         : clean_name,
+                        "code"         : paper_sizes[i] if paper_sizes else 0,
+                        "width_mm"     : width_mm,
+                        "height_mm"    : height_mm,
+                        "bin_name"     : None,
+                        "bin_id"       : None,
+                    })
+
+            # Build bin/tray presets
+            if bin_names and bin_ids:
+                for i, name in enumerate(bin_names):
+                    clean_name = name.strip("\x00").strip()
+                    if not clean_name:
+                        continue
+                    presets.append({
+                        "printer_name" : printer_name,
+                        "preset_type"  : "bin",
+                        "name"         : clean_name,
+                        "code"         : bin_ids[i] if bin_ids else 0,
+                        "width_mm"     : None,
+                        "height_mm"    : None,
+                        "bin_name"     : clean_name,
+                        "bin_id"       : bin_ids[i] if bin_ids else 0,
+                    })
+
+            logger.info(f"  - Collected {len(presets)} presets for {printer_name} ({len(paper_names) if paper_names else 0} papers, {len(bin_names) if bin_names else 0} trays)")
+        finally:
+            win32print.ClosePrinter(hPrinter)
+
+    except Exception as e:
+        logger.error(f"ERROR collecting presets for {printer_name}: {e}")
+
+    return presets
+
 def run_agent_loop(icon):
-    import requests
-    import win32print
-    import getpass
-    
     # 1. Initial Discovery
     try:
+        logger.info(f"Starting initial printer discovery (Server: {SERVER_ID}, API: {API})...")
         if DEV_MODE:
+            logger.info("Running in Simulation mode")
             discovered_printers = [{
                 "uid": "simulated-printer", 
                 "name": "Simulated Label Printer", 
                 "status": "online",
-                "properties": {"orientation": "portrait", "color": "monochrome", "duplex": "simplex"}
+                "properties": {
+                    "orientation": "portrait", 
+                    "color": "monochrome", 
+                    "duplex": "simplex",
+                    "has_color": False,
+                    "supported_papers": ["A4", "A5", "Letter"],
+                    "supported_bins": ["Manual Feed", "Tray 1"]
+                }
             }]
         else:
             printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+            logger.info(f"Found {len(printers)} printers in Windows spooler")
             discovered_printers = []
             for p in printers:
                 name = p[2]
                 props = get_printer_properties(name)
+                presets = get_all_presets(name)
                 discovered_printers.append({
                     "uid": name,
                     "name": name,
                     "status": "online",
-                    "properties": props
+                    "properties": props,
+                    "presets": presets
                 })
 
         payload = {"printers": discovered_printers, "server_uid": SERVER_ID, "os_user": getpass.getuser()}
+        logger.info(f"Reporting {len(discovered_printers)} printers to SaaS...")
         response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=10)
-        if response.status_code == 200: update_status(icon, "Online")
-        else: update_status(icon, f"Error {response.status_code}")
+        if response.status_code == 200: 
+            logger.info("Successfully reported printers to SaaS")
+            update_status(icon, "Online")
+        else: 
+            logger.error(f"Failed to report printers: HTTP {response.status_code} - {response.text}")
+            update_status(icon, f"Error {response.status_code}")
     except Exception as e:
+        logger.critical(f"CRITICAL ERROR in initial discovery: {e}")
         update_status(icon, "Offline")
 
     # 2. Main Polling Loop
+    logger.info("Entering main polling loop (interval: 5s)")
     while icon.visible:
         try:
             response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS, timeout=10)
@@ -259,23 +370,32 @@ def run_agent_loop(icon):
                 update_status(icon, "Online")
                 job = response.json()
                 if job:
+                    logger.info(f"New job received: {job.get('job_id')} for {job.get('printer_uid')}")
                     icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
                     try:
                         if job.get("format") in ["raw", "zpl"]:
+                            logger.info(f"Processing RAW/ZPL job...")
                             print_raw(job["content"], job["printer_uid"])
                         else:
+                            logger.info(f"Processing PDF job: Orientation={job.get('orientation')}, Bin={job.get('bin_name')}")
                             print_pdf(
                                 job["content"], 
                                 job["printer_uid"], 
                                 orientation=job.get("orientation", "portrait"),
                                 color_mode=job.get("color_mode"),
                                 duplex_mode=job.get("duplex_mode"),
-                                paper_size=job.get("paper_size")
+                                paper_size=job.get("paper_size"),
+                                bin_name=job.get("bin_name")
                             )
                         requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
+                        logger.info(f"Job {job.get('job_id')} completed and reported")
                     except Exception as e:
+                        logger.error(f"Job execution failed: {e}")
                         requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
-        except: pass
+            elif response.status_code != 204: # 204 No Content is normal
+                logger.warning(f"Unexpected polling response: HTTP {response.status_code}")
+        except Exception as e: 
+            logger.error(f"Polling error: {e}")
         time.sleep(5)
 
 def on_open_log(icon, item):
@@ -300,16 +420,7 @@ def run():
 
     init_paths()
 
-    # 1. Deferred Heavy Imports
-    import argparse
-    import configparser
-    import uuid
-    import hashlib
-    import getpass
-    import threading
-    import pystray
-    
-    # 2. Load Config
+    # 1. Load Config
     config = configparser.ConfigParser()
     if os.path.exists(config_file):
         try: config.read(config_file)
@@ -321,7 +432,7 @@ def run():
     DEV_MODE = config['General'].getboolean('dev_mode', False) if 'General' in config else False
     AUTO_START = config['General'].getboolean('auto_start', True) if 'General' in config else True
     
-    # 3. Parse Args
+    # 2. Parse Args
     parser = argparse.ArgumentParser()
     parser.add_argument('--api', default=API_DEFAULT)
     parser.add_argument('--license-key', default=LICENSE_KEY_DEFAULT)
@@ -333,7 +444,7 @@ def run():
     LICENSE_KEY = args.license_key
     DEV_MODE = args.dev
     
-    # 4. Finalize Identity
+    # 3. Finalize Identity
     if not LICENSE_KEY:
         STARTUP_ERROR = "setup_needed"
         SERVER_ID = "NewSetup"
@@ -342,16 +453,21 @@ def run():
         SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY, mac)
         HEADERS = {"X-License-Key": LICENSE_KEY, "X-Server-ID": SERVER_ID, "X-OS-User": getpass.getuser()}
 
-    # 5. Redirect Logs
+    # 4. Redirect Logs & Rotation
     if not os.environ.get('AGENT_CONSOLE_DEBUG'):
-        sys.stdout = Logger()
-        sys.stderr = sys.stdout
+        setup_logging()
+        logger.info("--- Print Agent Started ---")
+        logger.info(f"App Path: {application_path}")
+        logger.info(f"OS: {platform.system()} {platform.version()}")
+        logger.info(f"User: {getpass.getuser()}")
+    else:
+        print("Skipping file logging (AGENT_CONSOLE_DEBUG is set)")
 
-    # 6. Startup Registration
+    # 5. Startup Registration
     if platform.system() == "Windows":
         set_run_at_startup("OdooPrintAgent", action="install" if AUTO_START else "remove")
 
-    # 7. Start GUI (Almost Instant)
+    # 6. Start GUI (Almost Instant)
     icon = pystray.Icon("CloudPrintAgent")
     icon.menu = pystray.Menu(
         pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
