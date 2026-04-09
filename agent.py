@@ -260,61 +260,98 @@ def get_printer_properties(printer_name):
         logger.error(f"ERROR scanning properties for {printer_name}: {e}")
     return {}
 
+import traceback
+
 def get_all_presets(printer_name):
     """Get ALL available presets/paper sizes/bins for a printer"""
     presets = []
     try:
+        logger.info(f"  - Debug: Beginning preset scan for {printer_name}")
         hPrinter = win32print.OpenPrinter(printer_name)
         try:
             # Get paper names + sizes + bins
-            paper_names  = win32print.DeviceCapabilities(printer_name, "", DC_PAPERNAMES)
-            paper_sizes  = win32print.DeviceCapabilities(printer_name, "", DC_PAPERS)
-            paper_dims   = win32print.DeviceCapabilities(printer_name, "", DC_PAPERSIZE)
-            bin_names    = win32print.DeviceCapabilities(printer_name, "", DC_BINNAMES)
-            bin_ids      = win32print.DeviceCapabilities(printer_name, "", DC_BINS)
+            # Using try/except for each capability as some drivers fail on certain queries
+            paper_names = paper_sizes = paper_dims = bin_names = bin_ids = []
+            
+            try: paper_names = win32print.DeviceCapabilities(printer_name, "", DC_PAPERNAMES)
+            except: logger.warning(f"    - Driver failed to provide paper names")
+            
+            try: paper_sizes = win32print.DeviceCapabilities(printer_name, "", DC_PAPERS)
+            except: pass
+            
+            try: paper_dims = win32print.DeviceCapabilities(printer_name, "", DC_PAPERSIZE)
+            except: pass
+            
+            try: bin_names = win32print.DeviceCapabilities(printer_name, "", DC_BINNAMES)
+            except: logger.warning(f"    - Driver failed to provide bin names")
+            
+            try: bin_ids = win32print.DeviceCapabilities(printer_name, "", DC_BINS)
+            except: pass
 
             # Build paper presets
-            if paper_names and paper_sizes:
-                for i, name in enumerate(paper_names):
-                    clean_name = name.strip("\x00").strip()
-                    if not clean_name:
-                        continue
-                    width_mm  = round(paper_dims[i][0] / 10, 1) if paper_dims else 0
-                    height_mm = round(paper_dims[i][1] / 10, 1) if paper_dims else 0
-                    presets.append({
-                        "printer_name" : printer_name,
-                        "preset_type"  : "paper",
-                        "name"         : clean_name,
-                        "code"         : paper_sizes[i] if paper_sizes else 0,
-                        "width_mm"     : width_mm,
-                        "height_mm"    : height_mm,
-                        "bin_name"     : None,
-                        "bin_id"       : None,
-                    })
+            if paper_names:
+                p_names_cnt = len(paper_names) if paper_names else 0
+                p_sizes_cnt = len(paper_sizes) if paper_sizes else 0
+                p_dims_cnt = len(paper_dims) if paper_dims else 0
+                
+                for i in range(p_names_cnt):
+                    try:
+                        name = paper_names[i]
+                        clean_name = name.strip("\x00").strip()
+                        if not clean_name:
+                            continue
+                            
+                        # Safely get size code and dimensions
+                        code = paper_sizes[i] if i < p_sizes_cnt else 0
+                        width_mm = round(paper_dims[i][0] / 10, 1) if (i < p_dims_cnt and paper_dims[i]) else 0
+                        height_mm = round(paper_dims[i][1] / 10, 1) if (i < p_dims_cnt and paper_dims[i]) else 0
+                        
+                        presets.append({
+                            "printer_name" : printer_name,
+                            "preset_type"  : "paper",
+                            "name"         : clean_name,
+                            "code"         : code,
+                            "width_mm"     : width_mm,
+                            "height_mm"    : height_mm,
+                            "bin_name"     : None,
+                            "bin_id"       : None,
+                        })
+                    except: continue
 
             # Build bin/tray presets
-            if bin_names and bin_ids:
-                for i, name in enumerate(bin_names):
-                    clean_name = name.strip("\x00").strip()
-                    if not clean_name:
-                        continue
-                    presets.append({
-                        "printer_name" : printer_name,
-                        "preset_type"  : "bin",
-                        "name"         : clean_name,
-                        "code"         : bin_ids[i] if bin_ids else 0,
-                        "width_mm"     : None,
-                        "height_mm"    : None,
-                        "bin_name"     : clean_name,
-                        "bin_id"       : bin_ids[i] if bin_ids else 0,
-                    })
+            if bin_names:
+                b_names_cnt = len(bin_names) if bin_names else 0
+                b_ids_cnt = len(bin_ids) if bin_ids else 0
+                
+                for i in range(b_names_cnt):
+                    try:
+                        name = bin_names[i]
+                        clean_name = name.strip("\x00").strip()
+                        if not clean_name:
+                            continue
+                            
+                        # Safely get bin ID
+                        code = bin_ids[i] if i < b_ids_cnt else 0
+                        
+                        presets.append({
+                            "printer_name" : printer_name,
+                            "preset_type"  : "bin",
+                            "name"         : clean_name,
+                            "code"         : code,
+                            "width_mm"     : None,
+                            "height_mm"    : None,
+                            "bin_name"     : clean_name,
+                            "bin_id"       : code,
+                        })
+                    except: continue
 
-            logger.info(f"  - Collected {len(presets)} presets for {printer_name} ({len(paper_names) if paper_names else 0} papers, {len(bin_names) if bin_names else 0} trays)")
+            logger.info(f"  - Collected {len(presets)} presets for {printer_name}")
         finally:
             win32print.ClosePrinter(hPrinter)
 
     except Exception as e:
         logger.error(f"ERROR collecting presets for {printer_name}: {e}")
+        logger.error(traceback.format_exc())
 
     return presets
 
