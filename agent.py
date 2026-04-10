@@ -34,6 +34,7 @@ LICENSE_KEY = ""
 SERVER_ID = ""
 AUTO_START = True
 HEADERS = {}
+AGENT_VERSION = "1.0.5"
 STARTUP_ERROR = None
 DEV_MODE = False
 DC_PAPERS       = 2
@@ -254,10 +255,13 @@ def get_printer_properties(printer_name):
             # 2. Scan Device Capabilities (The "Menu" of options)
             # DC_COLORDEVICE returns 1 if hardware supports color
             try:
-                res["has_color"] = win32print.DeviceCapabilities(printer_name, "", DC_COLORDEVICE) > 0
-                logger.info(f"  - Hardware Color Support: {res['has_color']}")
+                result = win32print.DeviceCapabilities(printer_name, "", DC_COLORDEVICE)
+                res["has_color"] = result > 0
             except Exception as e:
-                logger.warning(f"  - Failed to scan and check color support: {e}")
+                # Label printers (Zebra, DYMO) don't support this call — expected
+                res["has_color"] = False
+                if "too small" not in str(e).lower():
+                    logger.warning(f"  - Failed to scan color support: {e}")
 
             # DC_PAPERNAMES returns a list of supported paper names
             try:
@@ -391,11 +395,11 @@ def upload_logs(line_count=100):
                 # Fetch specified number of lines, or 0 for full log
                 target_lines = lines if line_count == 0 else lines[-abs(line_count):]
                 
-                header = f"--- REMOTE LOG DUMP (Server: {SERVER_ID}) ---\n"
+                header = f"--- REMOTE LOG DUMP (Server: {SERVER_ID}, Version: {AGENT_VERSION}) ---\n"
                 header += f"--- Range: {'Full Log' if line_count == 0 else f'Last {len(target_lines)} lines'} ---\n\n"
                 
                 summary = header + "\n".join(target_lines)
-                requests.post(f"{API}/api/agent/upload_logs", json={"logs": summary}, headers=HEADERS, timeout=20)
+                requests.post(f"{API}/api/agent/upload_logs", json={"logs": summary}, headers=HEADERS, timeout=60)
     except Exception as e:
         logger.error(f"Failed to upload logs: {e}")
 
@@ -436,7 +440,7 @@ def run_agent_loop(icon):
 
         payload = {"printers": discovered_printers, "server_uid": SERVER_ID, "os_user": getpass.getuser()}
         logger.info(f"Reporting {len(discovered_printers)} printers to SaaS...")
-        response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=10)
+        response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=60)
         if response.status_code == 200: 
             logger.info("Successfully reported printers to SaaS")
             update_status(icon, "Online")
@@ -451,7 +455,7 @@ def run_agent_loop(icon):
     logger.info("Entering main polling loop (interval: 5s)")
     while icon.visible:
         try:
-            response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS, timeout=10)
+            response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS, timeout=20)
             if response.status_code == 200:
                 update_status(icon, "Online")
                 data = response.json()
@@ -545,7 +549,14 @@ def run():
     else:
         mac = uuid.getnode()
         SERVER_ID = args.server_id or generate_server_id(LICENSE_KEY, mac)
-        HEADERS = {"X-License-Key": LICENSE_KEY, "X-Server-ID": SERVER_ID, "X-OS-User": getpass.getuser()}
+        
+        global HEADERS
+        HEADERS = {
+            "X-License-Key": LICENSE_KEY, 
+            "X-Server-ID": SERVER_ID, 
+            "X-Agent-Version": AGENT_VERSION,
+            "X-OS-User": getpass.getuser()
+        }
 
     # 4. Redirect Logs & Rotation
     if not os.environ.get('AGENT_CONSOLE_DEBUG'):
@@ -564,6 +575,7 @@ def run():
     # 6. Start GUI (Almost Instant)
     icon = pystray.Icon("CloudPrintAgent")
     icon.menu = pystray.Menu(
+        pystray.MenuItem(f"Version: {AGENT_VERSION}", lambda i, item: None, enabled=False),
         pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
         pystray.MenuItem("Status: Initializing...", lambda i, item: None, enabled=False),
         pystray.MenuItem("View Log", on_open_log),
