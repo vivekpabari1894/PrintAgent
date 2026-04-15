@@ -33,20 +33,29 @@ jobs:
     - name: Generate Version Info
       run: python gen_version_info.py
 
+    - name: Get Agent Version
+      id: vars
+      shell: bash
+      run: |
+        VERSION=$(grep 'AGENT_VERSION =' agent.py | cut -d '"' -f 2)
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Using Version: $VERSION"
+
     - name: Build EXE (Bootloader + Compiled Logic)
-      # We target bootloader.py, which imports the compiled 'agent'.
-      # PyInstaller picks up agent.pyd automatically.
-      run: pyinstaller --noconsole --onefile --icon "agent_icon.ico" --version-file version_info.txt --name "OdooPrintAgent" --add-binary "SumatraPDF.exe;." --add-data "agent_logo.png;." bootloader.py
+      run: |
+        pyinstaller --noconsole --onefile --icon "agent_icon.ico" --version-file version_info.txt --name "OdooPrintAgent_v${{ steps.vars.outputs.version }}" --add-binary "SumatraPDF.exe;." --add-data "agent_logo.png;." bootloader.py
+    
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: OdooPrintAgent-Binary
-        path: dist/OdooPrintAgent.exe
+        path: dist/OdooPrintAgent_v${{ steps.vars.outputs.version }}.exe
+
     - name: Create Release
       uses: softprops/action-gh-release@v2
       if: startsWith(github.ref, 'refs/tags/')
       with:
-        files: dist/OdooPrintAgent.exe
+        files: dist/OdooPrintAgent_v${{ steps.vars.outputs.version }}.exe
         name: Release ${{ github.ref_name }}
         draft: false
         prerelease: false
