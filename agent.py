@@ -427,19 +427,10 @@ def upload_logs(line_count=100):
     except Exception as e:
         logger.error(f"Failed to upload logs: {e}")
 
-def _check_agent_update(icon, response_data):
-    """Check if the SaaS server is advertising a newer agent version."""
-    if not isinstance(response_data, dict):
-        return
-    latest = response_data.get("latest_agent_version")
-    if latest and latest != AGENT_VERSION:
-        logger.warning(f"Agent update available: {AGENT_VERSION} → {latest}")
-        update_status(icon, "Online", tooltip=f"Update Available: v{latest}")
 
-def run_agent_loop(icon):
-    # 1. Initial Discovery
+def sync_printers(icon=None):
     try:
-        logger.info(f"Starting initial printer discovery (Server: {SERVER_ID}, API: {API})...")
+        logger.info(f"Starting printer discovery (Server: {SERVER_ID}, API: {API})...")
         if DEV_MODE:
             logger.info("Running in Simulation mode")
             discovered_printers = [{
@@ -486,37 +477,46 @@ def run_agent_loop(icon):
         response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=60)
         if response.status_code == 200: 
             logger.info("Successfully reported printers to SaaS")
-            update_status(icon, "Online")
-            # Check if a newer agent version is available
-            try:
-                resp_data = response.json() if response.text else {}
-                _check_agent_update(icon, resp_data)
-            except: pass
+            if icon:
+                update_status(icon, "Online")
         else: 
             logger.error(f"Failed to report printers: HTTP {response.status_code} - {response.text}")
-            update_status(icon, f"Error {response.status_code}")
+            if icon:
+                update_status(icon, f"Error {response.status_code}")
     except Exception as e:
-        logger.critical(f"CRITICAL ERROR in initial discovery: {e}")
-        update_status(icon, "Offline")
+        logger.critical(f"CRITICAL ERROR in printer discovery: {e}")
+        if icon:
+            update_status(icon, "Offline")
 
-    # 2. Main Polling Loop
-    logger.info("Entering main polling loop (interval: 5s)")
+def run_agent_loop(icon):
+    # 1. Initial Discovery
+    sync_printers(icon)
+
+    # 2. Long-Poll Loop (replaces the 5s polling)
+    logger.info("Entering long-poll loop (server holds connection for ~25s per cycle)")
+    error_backoff = 1  # Start with 1s backoff on errors
     while icon.visible:
         try:
-            response = requests.get(f"{API}/api/agent/jobs", headers=HEADERS, timeout=20)
+            # Long-poll: server holds this request for up to 25 seconds
+            # Timeout is 35s to allow 25s server hold + 10s network buffer
+            response = requests.get(f"{API}/api/agent/poll", headers=HEADERS, timeout=35)
+
             if response.status_code == 200:
                 update_status(icon, "Online")
+                error_backoff = 1  # Reset backoff on success
                 data = response.json()
-                if data:
-                    # Check for agent update notification from server
-                    _check_agent_update(icon, data)
 
+                if data:
                     # Check for remote log request
                     if data.get('send_logs'):
                         lines_to_get = data.get('log_lines', 100)
                         threading.Thread(target=upload_logs, args=(lines_to_get,), daemon=True).start()
 
-                    # Only process if there's an actual job
+                    # Check for printer sync request
+                    if data.get('sync_printers'):
+                        threading.Thread(target=sync_printers, args=(icon,), daemon=True).start()
+
+                    # Process print job if present
                     if data.get('job_id'):
                         job = data
                         logger.info(f"New job received: {job.get('job_id')} for {job.get('printer_uid')}")
@@ -541,11 +541,26 @@ def run_agent_loop(icon):
                         except Exception as e:
                             logger.error(f"Job execution failed: {e}")
                             requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
-            elif response.status_code != 204: # 204 No Content is normal
-                logger.warning(f"Unexpected polling response: HTTP {response.status_code}")
-        except Exception as e: 
-            logger.error(f"Polling error: {e}")
-        time.sleep(5)
+
+                # No sleep needed — the long-poll itself IS the wait
+                # Reconnect immediately for the next cycle
+
+            elif response.status_code != 204:
+                logger.warning(f"Unexpected poll response: HTTP {response.status_code}")
+                time.sleep(error_backoff)
+
+        except requests.exceptions.Timeout:
+            # Server didn't respond within 35s — normal, just reconnect
+            logger.debug("Long-poll timeout, reconnecting...")
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Connection lost. Retrying in {error_backoff}s...")
+            update_status(icon, "Offline")
+            time.sleep(error_backoff)
+            error_backoff = min(error_backoff * 2, 30)  # Max 30s backoff
+        except Exception as e:
+            logger.error(f"Poll error: {e}")
+            time.sleep(error_backoff)
+            error_backoff = min(error_backoff * 2, 30)
 
 def on_open_log(icon, item):
     if os.path.exists(log_path): os.startfile(log_path)
