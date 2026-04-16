@@ -214,9 +214,9 @@ def update_status(icon, message, tooltip=None):
             pystray.MenuItem("Exit", on_exit)
         )
         if tooltip:
-            icon.title = f"Cloud Print Agent ({SERVER_ID}) - {tooltip}"
+            icon.title = f"Cloud Print Agent v{AGENT_VERSION} ({SERVER_ID}) - {tooltip}"
         else:
-            icon.title = f"Cloud Print Agent ({SERVER_ID})"
+            icon.title = f"Cloud Print Agent v{AGENT_VERSION} ({SERVER_ID})"
     
     # Actually pystray doesn't need thread-safe menu updates, but good practice
     _update()
@@ -583,7 +583,7 @@ def run():
         pystray.MenuItem("Exit", on_exit)
     )
     icon.icon = load_logo()
-    icon.title = f"Cloud Printing Agent"
+    icon.title = f"Cloud Print Agent v{AGENT_VERSION} ({SERVER_ID})"
     
     threading.Thread(target=run_agent_loop, args=(icon,), daemon=True).start()
     icon.run()
