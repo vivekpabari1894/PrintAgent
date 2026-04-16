@@ -34,7 +34,7 @@ LICENSE_KEY = ""
 SERVER_ID = ""
 AUTO_START = True
 HEADERS = {}
-AGENT_VERSION = "1.0.5"
+AGENT_VERSION = "1.0.6"
 STARTUP_ERROR = None
 DEV_MODE = False
 DC_PAPERS       = 2
@@ -229,6 +229,29 @@ def get_printer_properties(printer_name):
             # 1. Get Basic Info & Current Defaults
             info = win32print.GetPrinter(hPrinter, 2)
             dm = info['pDevMode']
+
+            # Map Windows spooler status bitmask to a human-readable status
+            raw_status = info.get('Status', 0)
+            if raw_status & 0x00000080:       # PRINTER_STATUS_OFFLINE
+                hw_status = 'offline'
+            elif raw_status & 0x00000002:      # PRINTER_STATUS_ERROR
+                hw_status = 'error'
+            elif raw_status & 0x00000008:      # PRINTER_STATUS_PAPER_JAM
+                hw_status = 'error'
+            elif raw_status & 0x00000010:      # PRINTER_STATUS_PAPER_OUT
+                hw_status = 'error'
+            elif raw_status & 0x00100000:      # PRINTER_STATUS_USER_INTERVENTION
+                hw_status = 'error'
+            elif raw_status & 0x00000001:      # PRINTER_STATUS_PAUSED
+                hw_status = 'paused'
+            elif raw_status & 0x00000400:      # PRINTER_STATUS_PRINTING
+                hw_status = 'printing'
+            elif raw_status == 0:
+                hw_status = 'online'
+            else:
+                hw_status = 'online'
+            logger.info(f"  - Windows Status Bitmask: {raw_status} -> {hw_status}")
+
             res = {
                 "orientation": "portrait",
                 "paper_size": "unknown",
@@ -239,7 +262,8 @@ def get_printer_properties(printer_name):
                 "comment": info.get('pComment', ''),
                 "has_color": False,
                 "supported_papers": [],
-                "supported_bins": []
+                "supported_bins": [],
+                "hw_status": hw_status
             }
             if dm:
                 res.update({
@@ -403,6 +427,15 @@ def upload_logs(line_count=100):
     except Exception as e:
         logger.error(f"Failed to upload logs: {e}")
 
+def _check_agent_update(icon, response_data):
+    """Check if the SaaS server is advertising a newer agent version."""
+    if not isinstance(response_data, dict):
+        return
+    latest = response_data.get("latest_agent_version")
+    if latest and latest != AGENT_VERSION:
+        logger.warning(f"Agent update available: {AGENT_VERSION} → {latest}")
+        update_status(icon, "Online", tooltip=f"Update Available: v{latest}")
+
 def run_agent_loop(icon):
     # 1. Initial Discovery
     try:
@@ -426,14 +459,24 @@ def run_agent_loop(icon):
             printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
             logger.info(f"Found {len(printers)} printers in Windows spooler")
             discovered_printers = []
+
+            # Filter out virtual/software printers that can't physically print
+            virtual_kw = ['pdf', 'microsoft print', 'onenote', 'xps', 'fax',
+                          'send to', 'one note', 'document writer', 'adobe pdf']
+
             for p in printers:
                 name = p[2]
+                if any(kw in name.lower() for kw in virtual_kw):
+                    logger.info(f"  - Skipping virtual printer: {name}")
+                    continue
                 props = get_printer_properties(name)
                 presets = get_all_presets(name)
+                # Use real Windows spooler status from properties
+                real_status = props.get('hw_status', 'online')
                 discovered_printers.append({
                     "uid": name,
                     "name": name,
-                    "status": "online",
+                    "status": real_status,
                     "properties": props,
                     "presets": presets
                 })
@@ -444,6 +487,11 @@ def run_agent_loop(icon):
         if response.status_code == 200: 
             logger.info("Successfully reported printers to SaaS")
             update_status(icon, "Online")
+            # Check if a newer agent version is available
+            try:
+                resp_data = response.json() if response.text else {}
+                _check_agent_update(icon, resp_data)
+            except: pass
         else: 
             logger.error(f"Failed to report printers: HTTP {response.status_code} - {response.text}")
             update_status(icon, f"Error {response.status_code}")
@@ -460,6 +508,9 @@ def run_agent_loop(icon):
                 update_status(icon, "Online")
                 data = response.json()
                 if data:
+                    # Check for agent update notification from server
+                    _check_agent_update(icon, data)
+
                     # Check for remote log request
                     if data.get('send_logs'):
                         lines_to_get = data.get('log_lines', 100)
@@ -584,8 +635,17 @@ def run():
     )
     icon.icon = load_logo()
     icon.title = f"Cloud Print Agent v{AGENT_VERSION} ({SERVER_ID})"
-    
-    threading.Thread(target=run_agent_loop, args=(icon,), daemon=True).start()
+
+    # Surface startup errors immediately instead of silently failing
+    if STARTUP_ERROR == "setup_needed":
+        logger.warning("No license key configured. Agent will not connect.")
+        def _show_setup_error(i):
+            time.sleep(2)  # Wait for tray icon to be visible
+            update_status(i, "No License Key", tooltip="Setup Required - Edit agent.ini")
+            i.notify("License key missing. Right-click tray icon > Edit Config to set up.", "Setup Required")
+        threading.Thread(target=_show_setup_error, args=(icon,), daemon=True).start()
+    else:
+        threading.Thread(target=run_agent_loop, args=(icon,), daemon=True).start()
     icon.run()
 
 if __name__ == '__main__':
