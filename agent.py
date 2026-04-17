@@ -34,7 +34,7 @@ LICENSE_KEY = ""
 SERVER_ID = ""
 AUTO_START = True
 HEADERS = {}
-AGENT_VERSION = "1.0.6"
+AGENT_VERSION = "1.0.7"
 STARTUP_ERROR = None
 DEV_MODE = False
 DC_PAPERS       = 2
@@ -521,23 +521,32 @@ def run_agent_loop(icon):
                         job = data
                         logger.info(f"New job received: {job.get('job_id')} for {job.get('printer_uid')}")
                         icon.notify(f"Printing to {job.get('printer_uid')}", "New Print Job")
+                        
+                        copies = job.get('copies', 1)
+                        if copies < 1: copies = 1
+                        
                         try:
-                            if job.get("format") in ["raw", "zpl"]:
-                                logger.info(f"Processing RAW/ZPL job...")
-                                print_raw(job["content"], job["printer_uid"])
-                            else:
-                                logger.info(f"Processing PDF job: Orientation={job.get('orientation')}, Bin={job.get('bin_name')}")
-                                print_pdf(
-                                    job["content"], 
-                                    job["printer_uid"], 
-                                    orientation=job.get("orientation", "portrait"),
-                                    color_mode=job.get("color_mode"),
-                                    duplex_mode=job.get("duplex_mode"),
-                                    paper_size=job.get("paper_size"),
-                                    bin_name=job.get("bin_name")
-                                )
+                            for i in range(copies):
+                                if copies > 1:
+                                    logger.info(f"Printing copy {i+1} of {copies}...")
+                                    
+                                if job.get("format") in ["raw", "zpl"]:
+                                    logger.info(f"Processing RAW/ZPL job...")
+                                    print_raw(job["content"], job["printer_uid"])
+                                else:
+                                    logger.info(f"Processing PDF job: Orientation={job.get('orientation')}, Bin={job.get('bin_name')}")
+                                    print_pdf(
+                                        job["content"], 
+                                        job["printer_uid"], 
+                                        orientation=job.get("orientation", "portrait"),
+                                        color_mode=job.get("color_mode"),
+                                        duplex_mode=job.get("duplex_mode"),
+                                        paper_size=job.get("paper_size"),
+                                        bin_name=job.get("bin_name")
+                                    )
+                            
                             requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "done"}, headers=HEADERS)
-                            logger.info(f"Job {job.get('job_id')} completed and reported")
+                            logger.info(f"Job {job.get('job_id')} completed ({copies} copies) and reported")
                         except Exception as e:
                             logger.error(f"Job execution failed: {e}")
                             requests.post(f"{API}/api/jobs/status", json={"job_id": job["job_id"], "status": "error", "error": str(e)}, headers=HEADERS)
