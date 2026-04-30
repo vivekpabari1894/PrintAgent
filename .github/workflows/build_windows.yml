@@ -22,7 +22,7 @@ jobs:
       run: |
         Invoke-WebRequest -Uri "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2.zip" -OutFile "SumatraPDF.zip"
         Expand-Archive -Path "SumatraPDF.zip" -DestinationPath "."
-        Move-Item "SumatraPDF-3.5.2.exe" "SumatraPDF.exe"
+        Get-ChildItem -Filter "SumatraPDF*.exe" | Select-Object -First 1 | Rename-Item -NewName "SumatraPDF.exe"
     - name: Compile Agent with Cython
       run: |
         # Generate C file and compile to ID (In-place) -> agent.pyd
