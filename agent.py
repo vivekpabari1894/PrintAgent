@@ -34,7 +34,7 @@ LICENSE_KEY = ""
 SERVER_ID = ""
 AUTO_START = True
 HEADERS = {}
-AGENT_VERSION = "1.0.8"
+AGENT_VERSION = "1.0.9"
 STARTUP_ERROR = None
 DEV_MODE = False
 DC_PAPERS       = 2
@@ -60,6 +60,19 @@ def init_paths():
 def generate_server_id(license_key, mac):
     unique_str = f"{mac}-{license_key}"
     return "server-" + hashlib.md5(unique_str.encode()).hexdigest()[:8]
+
+def get_os_display_name():
+    os_name = platform.system()
+    if os_name == "Windows":
+        try:
+            # sys.getwindowsversion() is the most reliable way to detect Win11
+            version = sys.getwindowsversion()
+            if version.build >= 22000:
+                return f"Windows 11 (Build {version.build})"
+            return f"Windows 10 (Build {version.build})"
+        except Exception:
+            return f"{os_name} {platform.release()}"
+    return f"{os_name} {platform.release()}"
 
 def set_run_at_startup(app_name, action="install"):
     if platform.system() != "Windows": return False
@@ -325,16 +338,21 @@ def get_all_presets(printer_name):
         try:
             # Get paper names + sizes + bins
             # Using try/except for each capability as some drivers fail on certain queries
-            paper_names = paper_sizes = paper_dims = bin_names = bin_ids = []
+            # NOTE: must use separate assignments — chain assignment would make them all the same object
+            paper_names = []
+            paper_sizes = []
+            paper_dims  = []
+            bin_names   = []
+            bin_ids     = []
             
             try: paper_names = win32print.DeviceCapabilities(printer_name, "", DC_PAPERNAMES)
             except: logger.warning(f"    - Driver failed to provide paper names")
             
             try: paper_sizes = win32print.DeviceCapabilities(printer_name, "", DC_PAPERS)
-            except: pass
+            except: logger.warning(f"    - Driver failed to provide paper codes (DC_PAPERS)")
             
             try: paper_dims = win32print.DeviceCapabilities(printer_name, "", DC_PAPERSIZE)
-            except: pass
+            except: logger.warning(f"    - Driver failed to provide paper dimensions (DC_PAPERSIZE) — width/height will be 0")
             
             try: bin_names = win32print.DeviceCapabilities(printer_name, "", DC_BINNAMES)
             except: logger.warning(f"    - Driver failed to provide bin names")
@@ -342,11 +360,13 @@ def get_all_presets(printer_name):
             try: bin_ids = win32print.DeviceCapabilities(printer_name, "", DC_BINS)
             except: pass
 
+            logger.info(f"  - paper_names={len(paper_names)}, paper_sizes={len(paper_sizes)}, paper_dims={len(paper_dims)}, bin_names={len(bin_names)}")
+
             # Build paper presets
             if paper_names:
-                p_names_cnt = len(paper_names) if paper_names else 0
-                p_sizes_cnt = len(paper_sizes) if paper_sizes else 0
-                p_dims_cnt = len(paper_dims) if paper_dims else 0
+                p_names_cnt = len(paper_names)
+                p_sizes_cnt = len(paper_sizes)
+                p_dims_cnt  = len(paper_dims)
                 
                 for i in range(p_names_cnt):
                     try:
@@ -357,8 +377,13 @@ def get_all_presets(printer_name):
                             
                         # Safely get size code and dimensions
                         code = paper_sizes[i] if i < p_sizes_cnt else 0
-                        width_mm = round(paper_dims[i][0] / 10, 1) if (i < p_dims_cnt and paper_dims[i]) else 0
-                        height_mm = round(paper_dims[i][1] / 10, 1) if (i < p_dims_cnt and paper_dims[i]) else 0
+                        
+                        if i < p_dims_cnt and paper_dims[i]:
+                            width_mm  = round(paper_dims[i][0] / 10, 1)
+                            height_mm = round(paper_dims[i][1] / 10, 1)
+                        else:
+                            width_mm  = 0.0
+                            height_mm = 0.0
                         
                         presets.append({
                             "printer_name" : printer_name,
@@ -462,6 +487,26 @@ def sync_printers(icon=None):
                     continue
                 props = get_printer_properties(name)
                 presets = get_all_presets(name)
+
+                # Fallback: if get_all_presets returned no paper presets (driver bug / DC_PAPERNAMES failure),
+                # build basic paper presets from the supported_papers captured by get_printer_properties.
+                # These will have no width/height dimensions but at least names will be synced to SaaS.
+                paper_preset_names = {p['name'] for p in presets if p.get('preset_type') == 'paper'}
+                missing_papers = [pn for pn in props.get('supported_papers', []) if pn not in paper_preset_names]
+                if missing_papers:
+                    logger.warning(f"  - get_all_presets returned no paper presets for {name}, using fallback for {len(missing_papers)} papers")
+                    for paper_name in missing_papers:
+                        presets.append({
+                            "printer_name": name,
+                            "preset_type":  "paper",
+                            "name":         paper_name,
+                            "code":         0,
+                            "width_mm":     None,
+                            "height_mm":    None,
+                            "bin_name":     None,
+                            "bin_id":       None,
+                        })
+
                 # Use real Windows spooler status from properties
                 real_status = props.get('hw_status', 'online')
                 discovered_printers.append({
@@ -472,7 +517,12 @@ def sync_printers(icon=None):
                     "presets": presets
                 })
 
-        payload = {"printers": discovered_printers, "server_uid": SERVER_ID, "os_user": getpass.getuser()}
+        payload = {
+            "printers": discovered_printers,
+            "server_uid": SERVER_ID,
+            "os_user": getpass.getuser(),
+            "os_name": get_os_display_name()
+        }
         logger.info(f"Reporting {len(discovered_printers)} printers to SaaS...")
         response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=60)
         if response.status_code == 200: 
@@ -630,7 +680,8 @@ def run():
             "X-License-Key": LICENSE_KEY, 
             "X-Server-ID": SERVER_ID, 
             "X-Agent-Version": AGENT_VERSION,
-            "X-OS-User": getpass.getuser()
+            "X-OS-User": getpass.getuser(),
+            "X-OS-Name": get_os_display_name()
         }
 
     # 4. Redirect Logs & Rotation
@@ -638,7 +689,7 @@ def run():
         setup_logging()
         logger.info("--- Print Agent Started ---")
         logger.info(f"App Path: {application_path}")
-        logger.info(f"OS: {platform.system()} {platform.version()}")
+        logger.info(f"OS: {get_os_display_name()}")
         logger.info(f"User: {getpass.getuser()}")
     else:
         logger.info("Skipping file logging (AGENT_CONSOLE_DEBUG is set)")
