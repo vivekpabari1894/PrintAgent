@@ -495,26 +495,50 @@ def perform_auto_update(download_url, target_ver=None, icon=None):
 
     try:
         ver_str = f" to v{target_ver}" if target_ver else ""
-        logger.info(f"Auto-update: Starting download from {download_url}{ver_str}...")
         if icon:
             update_status(icon, "Updating...", tooltip=f"Downloading agent update{ver_str}...")
-
-        resp = requests.get(download_url, headers=HEADERS, timeout=120)
-        if resp.status_code != 200 or len(resp.content) < 50000:
-            logger.error(f"Auto-update failed: HTTP {resp.status_code}, received size={len(resp.content)} bytes")
-            if icon:
-                update_status(icon, "Online")
-            return
 
         current_exe = os.path.abspath(sys.executable)
         exe_dir = os.path.dirname(current_exe)
         new_exe = os.path.join(exe_dir, "agent_new.exe")
         bat_path = os.path.join(exe_dir, "updater.bat")
 
-        with open(new_exe, "wb") as f:
-            f.write(resp.content)
+        # Stream download in 64KB chunks with up to 3 retries
+        download_success = False
+        for attempt in range(1, 4):
+            try:
+                logger.info(f"Auto-update: Attempt {attempt} downloading from {download_url}...")
+                with requests.get(download_url, headers=HEADERS, stream=True, timeout=120) as resp:
+                    resp.raise_for_status()
+                    total_size = int(resp.headers.get('content-length', 0))
+                    downloaded = 0
+                    with open(new_exe, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
 
-        logger.info(f"Auto-update: Downloaded {len(resp.content)} bytes to {new_exe}")
+                if total_size and downloaded < total_size:
+                    raise IOError(f"Incomplete download: {downloaded}/{total_size} bytes")
+                if downloaded < 50000:
+                    raise IOError(f"Downloaded binary too small ({downloaded} bytes)")
+
+                download_success = True
+                logger.info(f"Auto-update: Successfully downloaded {downloaded} bytes to {new_exe}")
+                break
+            except Exception as dl_err:
+                logger.warning(f"Auto-update: Attempt {attempt} failed: {dl_err}")
+                if os.path.exists(new_exe):
+                    try: os.unlink(new_exe)
+                    except: pass
+                if attempt < 3:
+                    time.sleep(2)
+
+        if not download_success:
+            logger.error("Auto-update failed: all 3 download attempts failed.")
+            if icon:
+                update_status(icon, "Online")
+            return
 
         # Batch script waits for the running agent process to exit, swaps EXE, and relaunches
         bat_script = f"""@echo off
