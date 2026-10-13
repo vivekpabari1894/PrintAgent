@@ -484,90 +484,6 @@ def get_all_presets(printer_name):
 
     return presets
 
-def perform_auto_update(download_url, target_ver=None, icon=None):
-    """
-    Downloads the latest agent binary, writes an updater batch script,
-    and restarts the agent seamlessly with the new version.
-    """
-    if not getattr(sys, 'frozen', False):
-        logger.warning("Auto-update skipped: Agent is running from source Python script, not a packaged EXE.")
-        return
-
-    try:
-        ver_str = f" to v{target_ver}" if target_ver else ""
-        if icon:
-            update_status(icon, "Updating...", tooltip=f"Downloading agent update{ver_str}...")
-
-        current_exe = os.path.abspath(sys.executable)
-        exe_dir = os.path.dirname(current_exe)
-        new_exe = os.path.join(exe_dir, "agent_new.exe")
-        bat_path = os.path.join(exe_dir, "updater.bat")
-
-        # Stream download in 64KB chunks with up to 3 retries
-        download_success = False
-        for attempt in range(1, 4):
-            try:
-                logger.info(f"Auto-update: Attempt {attempt} downloading from {download_url}...")
-                with requests.get(download_url, headers=HEADERS, stream=True, timeout=120) as resp:
-                    resp.raise_for_status()
-                    total_size = int(resp.headers.get('content-length', 0))
-                    downloaded = 0
-                    with open(new_exe, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=65536):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-
-                if total_size and downloaded < total_size:
-                    raise IOError(f"Incomplete download: {downloaded}/{total_size} bytes")
-                if downloaded < 50000:
-                    raise IOError(f"Downloaded binary too small ({downloaded} bytes)")
-
-                download_success = True
-                logger.info(f"Auto-update: Successfully downloaded {downloaded} bytes to {new_exe}")
-                break
-            except Exception as dl_err:
-                logger.warning(f"Auto-update: Attempt {attempt} failed: {dl_err}")
-                if os.path.exists(new_exe):
-                    try: os.unlink(new_exe)
-                    except: pass
-                if attempt < 3:
-                    time.sleep(2)
-
-        if not download_success:
-            logger.error("Auto-update failed: all 3 download attempts failed.")
-            if icon:
-                update_status(icon, "Online")
-            return
-
-        # Batch script waits for the running agent process to exit, swaps EXE, and relaunches
-        bat_script = f"""@echo off
-timeout /t 2 /nobreak > nul
-:retry
-move /y "{new_exe}" "{current_exe}" > nul 2>&1
-if errorlevel 1 (
-    timeout /t 1 /nobreak > nul
-    goto retry
-)
-start "" "{current_exe}"
-del "%~f0"
-"""
-        with open(bat_path, "w", encoding="ascii") as f:
-            f.write(bat_script)
-
-        logger.info(f"Auto-update: Launching updater script {bat_path} and terminating...")
-        creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) if platform.system() == "Windows" else 0
-        subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=creation_flags)
-
-        if icon:
-            icon.visible = False
-            icon.stop()
-        os._exit(0)
-    except Exception as e:
-        logger.error(f"Auto-update encountered exception: {e}")
-        if icon:
-            update_status(icon, "Online")
-
 def upload_logs(line_count=100):
     try:
         if os.path.exists(log_path):
@@ -718,12 +634,6 @@ def run_agent_loop(icon):
                 data = response.json()
 
                 if data:
-                    # Check for remote agent update request
-                    if data.get('update_agent'):
-                        download_url = data.get('agent_download_url') or f"{API}/download/agent/raw"
-                        target_ver = data.get('latest_agent_version')
-                        threading.Thread(target=perform_auto_update, args=(download_url, target_ver, icon), daemon=True).start()
-
                     # Check for remote log request
                     if data.get('send_logs'):
                         lines_to_get = data.get('log_lines', 100)
