@@ -32,9 +32,10 @@ import shutil
 API = ""
 LICENSE_KEY = ""
 SERVER_ID = ""
+MACHINE_ID = ""
 AUTO_START = True
 HEADERS = {}
-AGENT_VERSION = "1.0.9"
+AGENT_VERSION = "1.1.0"
 STARTUP_ERROR = None
 DEV_MODE = False
 DC_PAPERS       = 2
@@ -73,6 +74,52 @@ def get_os_display_name():
         except Exception:
             return f"{os_name} {platform.release()}"
     return f"{os_name} {platform.release()}"
+
+def get_machine_id():
+    """
+    Get a persistent, hardware-tied machine ID.
+    Reads MachineGuid from Windows Registry HKLM\SOFTWARE\Microsoft\Cryptography.
+    Falls back to system MAC address if registry is inaccessible.
+    """
+    if platform.system() == "Windows":
+        try:
+            with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0, reg.KEY_READ | reg.KEY_WOW64_64KEY) as key:
+                guid, _ = reg.QueryValueEx(key, "MachineGuid")
+                if guid:
+                    return f"win-{guid.strip().lower()}"
+        except Exception:
+            pass
+
+    # Fallback to MAC address
+    try:
+        node = uuid.getnode()
+        mac = ':'.join(['{:02x}'.format((node >> ele) & 0xff) for ele in range(0, 8*6, 8)][::-1])
+        return f"mac-{hashlib.sha256(mac.encode()).hexdigest()[:16]}"
+    except Exception:
+        return "unknown-machine"
+
+def get_spooler_status():
+    """Check if Windows Print Spooler service is running."""
+    if platform.system() != "Windows":
+        return "unknown"
+    try:
+        res = subprocess.run(["sc", "query", "spooler"], capture_output=True, text=True, timeout=3)
+        if "RUNNING" in res.stdout:
+            return "running"
+        elif "STOPPED" in res.stdout:
+            return "stopped"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+def get_c_drive_free_gb():
+    """Get free disk space on primary OS drive in GB."""
+    try:
+        drive_root = "C:\\" if platform.system() == "Windows" else "/"
+        total, used, free = shutil.disk_usage(drive_root)
+        return round(free / (1024 ** 3), 2)
+    except Exception:
+        return None
 
 def set_run_at_startup(app_name, action="install"):
     if platform.system() != "Windows": return False
@@ -273,6 +320,9 @@ def get_printer_properties(printer_name):
                 "duplex": "simplex",
                 "location": info.get('pLocation', ''),
                 "comment": info.get('pComment', ''),
+                "port_name": str(info.get('pPortName') or ''),
+                "driver_name": str(info.get('pDriverName') or ''),
+                "job_count": int(info.get('cJobs', 0)),
                 "has_color": False,
                 "supported_papers": [],
                 "supported_bins": [],
@@ -434,6 +484,66 @@ def get_all_presets(printer_name):
 
     return presets
 
+def perform_auto_update(download_url, target_ver=None, icon=None):
+    """
+    Downloads the latest agent binary, writes an updater batch script,
+    and restarts the agent seamlessly with the new version.
+    """
+    if not getattr(sys, 'frozen', False):
+        logger.warning("Auto-update skipped: Agent is running from source Python script, not a packaged EXE.")
+        return
+
+    try:
+        ver_str = f" to v{target_ver}" if target_ver else ""
+        logger.info(f"Auto-update: Starting download from {download_url}{ver_str}...")
+        if icon:
+            update_status(icon, "Updating...", tooltip=f"Downloading agent update{ver_str}...")
+
+        resp = requests.get(download_url, headers=HEADERS, timeout=120)
+        if resp.status_code != 200 or len(resp.content) < 50000:
+            logger.error(f"Auto-update failed: HTTP {resp.status_code}, received size={len(resp.content)} bytes")
+            if icon:
+                update_status(icon, "Online")
+            return
+
+        current_exe = os.path.abspath(sys.executable)
+        exe_dir = os.path.dirname(current_exe)
+        new_exe = os.path.join(exe_dir, "agent_new.exe")
+        bat_path = os.path.join(exe_dir, "updater.bat")
+
+        with open(new_exe, "wb") as f:
+            f.write(resp.content)
+
+        logger.info(f"Auto-update: Downloaded {len(resp.content)} bytes to {new_exe}")
+
+        # Batch script waits for the running agent process to exit, swaps EXE, and relaunches
+        bat_script = f"""@echo off
+timeout /t 2 /nobreak > nul
+:retry
+move /y "{new_exe}" "{current_exe}" > nul 2>&1
+if errorlevel 1 (
+    timeout /t 1 /nobreak > nul
+    goto retry
+)
+start "" "{current_exe}"
+del "%~f0"
+"""
+        with open(bat_path, "w", encoding="ascii") as f:
+            f.write(bat_script)
+
+        logger.info(f"Auto-update: Launching updater script {bat_path} and terminating...")
+        creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) if platform.system() == "Windows" else 0
+        subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=creation_flags)
+
+        if icon:
+            icon.visible = False
+            icon.stop()
+        os._exit(0)
+    except Exception as e:
+        logger.error(f"Auto-update encountered exception: {e}")
+        if icon:
+            update_status(icon, "Online")
+
 def upload_logs(line_count=100):
     try:
         if os.path.exists(log_path):
@@ -520,15 +630,36 @@ def sync_printers(icon=None):
         payload = {
             "printers": discovered_printers,
             "server_uid": SERVER_ID,
+            "machine_id": MACHINE_ID,
             "os_user": getpass.getuser(),
-            "os_name": get_os_display_name()
+            "os_name": get_os_display_name(),
+            "spooler_status": get_spooler_status(),
+            "disk_free_gb": get_c_drive_free_gb(),
+            "agent_version": AGENT_VERSION,
         }
-        logger.info(f"Reporting {len(discovered_printers)} printers to SaaS...")
+        logger.info(f"Reporting {len(discovered_printers)} printers to SaaS (Machine ID: {MACHINE_ID})...")
         response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=60)
         if response.status_code == 200: 
             logger.info("Successfully reported printers to SaaS")
             if icon:
                 update_status(icon, "Online")
+        elif response.status_code == 403:
+            try:
+                err_data = response.json()
+                err_code = err_data.get('code')
+                err_msg = err_data.get('error', response.text)
+            except Exception:
+                err_code = None
+                err_msg = response.text
+
+            if err_code == 'trial_already_used':
+                logger.error(f"TRIAL BLOCKED: {err_msg}")
+                if icon:
+                    update_status(icon, "Trial Blocked", tooltip="This PC already used a free trial.")
+            else:
+                logger.error(f"Failed to report printers: HTTP 403 - {err_msg}")
+                if icon:
+                    update_status(icon, "Access Denied")
         else: 
             logger.error(f"Failed to report printers: HTTP {response.status_code} - {response.text}")
             if icon:
@@ -547,6 +678,12 @@ def run_agent_loop(icon):
     error_backoff = 1  # Start with 1s backoff on errors
     while icon.visible:
         try:
+            # Refresh live telemetry in heartbeat headers
+            HEADERS["X-Spooler-Status"] = get_spooler_status()
+            disk_gb = get_c_drive_free_gb()
+            if disk_gb is not None:
+                HEADERS["X-Disk-Free-GB"] = str(disk_gb)
+
             # Long-poll: server holds this request for up to 25 seconds
             # Timeout is 35s to allow 25s server hold + 10s network buffer
             response = requests.get(f"{API}/api/agent/poll", headers=HEADERS, timeout=35)
@@ -557,6 +694,12 @@ def run_agent_loop(icon):
                 data = response.json()
 
                 if data:
+                    # Check for remote agent update request
+                    if data.get('update_agent'):
+                        download_url = data.get('agent_download_url') or f"{API}/download/agent/raw"
+                        target_ver = data.get('latest_agent_version')
+                        threading.Thread(target=perform_auto_update, args=(download_url, target_ver, icon), daemon=True).start()
+
                     # Check for remote log request
                     if data.get('send_logs'):
                         lines_to_get = data.get('log_lines', 100)
@@ -604,6 +747,22 @@ def run_agent_loop(icon):
                 # No sleep needed — the long-poll itself IS the wait
                 # Reconnect immediately for the next cycle
 
+            elif response.status_code == 403:
+                try:
+                    err_json = response.json()
+                    err_msg = err_json.get('error', 'License Forbidden')
+                    err_code = err_json.get('code')
+                except Exception:
+                    err_msg = 'License Forbidden'
+                    err_code = None
+                logger.error(f"Authentication/License Error: {err_msg}")
+                if err_code == 'trial_already_used':
+                    update_status(icon, "Trial Blocked", tooltip="This PC already used a free trial.")
+                else:
+                    update_status(icon, "Access Denied", tooltip=err_msg)
+                time.sleep(min(error_backoff * 2, 30))
+                error_backoff = min(error_backoff * 2, 30)
+
             elif response.status_code != 204:
                 logger.warning(f"Unexpected poll response: HTTP {response.status_code}")
                 time.sleep(error_backoff)
@@ -633,7 +792,7 @@ def on_exit(icon, item):
     sys.exit(0)
 
 def run():
-    global API, LICENSE_KEY, SERVER_ID, HEADERS, AUTO_START, STARTUP_ERROR, DEV_MODE, pystray
+    global API, LICENSE_KEY, SERVER_ID, MACHINE_ID, HEADERS, AUTO_START, STARTUP_ERROR, DEV_MODE, pystray
     
     # 0. Single Instance Check (Instant!)
     m_name = f"Global\\OdooPrintAgent_v2" 
@@ -668,6 +827,8 @@ def run():
     DEV_MODE = args.dev
     
     # 3. Finalize Identity
+    MACHINE_ID = get_machine_id()
+
     if not LICENSE_KEY:
         STARTUP_ERROR = "setup_needed"
         SERVER_ID = "NewSetup"
@@ -679,9 +840,12 @@ def run():
         HEADERS = {
             "X-License-Key": LICENSE_KEY, 
             "X-Server-ID": SERVER_ID, 
+            "X-Machine-ID": MACHINE_ID,
             "X-Agent-Version": AGENT_VERSION,
             "X-OS-User": getpass.getuser(),
-            "X-OS-Name": get_os_display_name()
+            "X-OS-Name": get_os_display_name(),
+            "X-Spooler-Status": get_spooler_status(),
+            "X-Disk-Free-GB": str(get_c_drive_free_gb() or "")
         }
 
     # 4. Redirect Logs & Rotation
@@ -689,6 +853,7 @@ def run():
         setup_logging()
         logger.info("--- Print Agent Started ---")
         logger.info(f"App Path: {application_path}")
+        logger.info(f"Machine ID: {MACHINE_ID}")
         logger.info(f"OS: {get_os_display_name()}")
         logger.info(f"User: {getpass.getuser()}")
     else:
