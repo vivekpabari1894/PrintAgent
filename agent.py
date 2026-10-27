@@ -13,6 +13,8 @@ import uuid
 import getpass
 import threading
 import logging
+import webbrowser
+import re
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
 # Windows Specific Imports
@@ -36,6 +38,10 @@ MACHINE_ID = ""
 AUTO_START = True
 HEADERS = {}
 AGENT_VERSION = "1.1.0"
+UPDATE_AVAILABLE = False
+LATEST_AGENT_VERSION = ""
+UPDATE_DOWNLOAD_URL = ""
+HAS_NOTIFIED_UPDATE = False
 STARTUP_ERROR = None
 DEV_MODE = False
 DC_PAPERS       = 2
@@ -263,18 +269,69 @@ def print_raw(content_base64, printer_name):
     finally:
         win32print.ClosePrinter(hPrinter)
 
+def is_newer_version(current_ver, latest_ver):
+    """Returns True if latest_ver is semantically strictly greater than current_ver."""
+    if not latest_ver or not current_ver:
+        return False
+    try:
+        def parse(v):
+            return [int(x) for x in re.findall(r'\d+', str(v))]
+        return parse(latest_ver) > parse(current_ver)
+    except Exception:
+        return False
+
+def on_open_download(icon=None, item=None):
+    url = UPDATE_DOWNLOAD_URL or f"{API}/download/agent"
+    logger.info(f"User requested download. Opening browser: {url}")
+    try:
+        webbrowser.open(url)
+    except Exception as e:
+        logger.error(f"Failed to open download URL in browser: {e}")
+
+def check_and_notify_update(icon, latest_ver, dl_url=None):
+    global UPDATE_AVAILABLE, LATEST_AGENT_VERSION, UPDATE_DOWNLOAD_URL, HAS_NOTIFIED_UPDATE
+    if not latest_ver:
+        return
+    LATEST_AGENT_VERSION = str(latest_ver).strip()
+    UPDATE_DOWNLOAD_URL = dl_url or f"{API}/download/agent"
+
+    if is_newer_version(AGENT_VERSION, LATEST_AGENT_VERSION):
+        UPDATE_AVAILABLE = True
+        logger.info(f"New agent version available: v{LATEST_AGENT_VERSION} (Current: v{AGENT_VERSION}). Download URL: {UPDATE_DOWNLOAD_URL}")
+        if not HAS_NOTIFIED_UPDATE:
+            HAS_NOTIFIED_UPDATE = True
+            if icon:
+                try:
+                    icon.notify(
+                        f"New version v{LATEST_AGENT_VERSION} is available! Right-click this tray icon to download.",
+                        "Cloud Print Agent Update"
+                    )
+                except Exception as notify_err:
+                    logger.warning(f"Could not display update notification: {notify_err}")
+            update_status(icon, "Online")
+
 def update_status(icon, message, tooltip=None):
     # This might be called from background thread
     def _update():
-        icon.menu = pystray.Menu(
+        menu_items = [
             pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
             pystray.MenuItem("Status: " + message, lambda i, item: None, enabled=False),
+            pystray.MenuItem(f"Version: {AGENT_VERSION}", lambda i, item: None, enabled=False),
+        ]
+        if UPDATE_AVAILABLE and LATEST_AGENT_VERSION:
+            menu_items.append(
+                pystray.MenuItem(f"Download Update (v{LATEST_AGENT_VERSION})", on_open_download)
+            )
+        menu_items.extend([
             pystray.MenuItem("View Log", on_open_log),
             pystray.MenuItem("Edit Config", on_open_config),
             pystray.MenuItem("Exit", on_exit)
-        )
+        ])
+        icon.menu = pystray.Menu(*menu_items)
         if tooltip:
             icon.title = f"Cloud Print Agent v{AGENT_VERSION} ({SERVER_ID}) - {tooltip}"
+        elif UPDATE_AVAILABLE and LATEST_AGENT_VERSION:
+            icon.title = f"Cloud Print Agent v{AGENT_VERSION} ({SERVER_ID}) - Update Available (v{LATEST_AGENT_VERSION})"
         else:
             icon.title = f"Cloud Print Agent v{AGENT_VERSION} ({SERVER_ID})"
     
@@ -581,6 +638,15 @@ def sync_printers(icon=None):
         response = requests.post(f"{API}/api/agent/printers", json=payload, headers=HEADERS, timeout=60)
         if response.status_code == 200: 
             logger.info("Successfully reported printers to SaaS")
+            try:
+                res_data = response.json()
+                latest_ver = res_data.get('latest_agent_version')
+                dl_url = res_data.get('agent_download_url')
+                if latest_ver:
+                    check_and_notify_update(icon, latest_ver, dl_url)
+            except Exception as res_err:
+                logger.debug(f"Could not parse agent version info: {res_err}")
+
             if icon:
                 update_status(icon, "Online")
         elif response.status_code == 403:
@@ -642,6 +708,10 @@ def run_agent_loop(icon):
                     # Check for printer sync request
                     if data.get('sync_printers'):
                         threading.Thread(target=sync_printers, args=(icon,), daemon=True).start()
+
+                    # Check for version update in poll
+                    if data.get('latest_agent_version'):
+                        check_and_notify_update(icon, data.get('latest_agent_version'), data.get('agent_download_url'))
 
                     # Process print job if present
                     if data.get('job_id'):
