@@ -15,6 +15,8 @@ import threading
 import logging
 import webbrowser
 import re
+import traceback
+import shutil
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
 # Windows Specific Imports
@@ -23,12 +25,17 @@ import win32api
 import winerror
 import winreg as reg
 import win32print
+try:
+    import win32serviceutil
+    import win32service
+except ImportError:
+    win32serviceutil = None
+    win32service = None
 
 # Third Party
 import requests
 import pystray
 from PIL import Image
-import shutil
 
 # Global variables (initialized in run())
 API = ""
@@ -37,13 +44,16 @@ SERVER_ID = ""
 MACHINE_ID = ""
 AUTO_START = True
 HEADERS = {}
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.1.1"
 UPDATE_AVAILABLE = False
 LATEST_AGENT_VERSION = ""
 UPDATE_DOWNLOAD_URL = ""
 HAS_NOTIFIED_UPDATE = False
 STARTUP_ERROR = None
 DEV_MODE = False
+CURRENT_STATUS_TEXT = None
+_LAST_SPOOLER_CHECK = 0
+_CACHED_SPOOLER_STATUS = "unknown"
 DC_PAPERS       = 2
 DC_PAPERSIZE    = 3
 DC_PAPERNAMES   = 16
@@ -105,16 +115,50 @@ def get_machine_id():
         return "unknown-machine"
 
 def get_spooler_status():
-    """Check if Windows Print Spooler service is running."""
+    """Check if Windows Print Spooler service is running without spawning a console window."""
+    global _LAST_SPOOLER_CHECK, _CACHED_SPOOLER_STATUS
+    now = time.time()
+    if now - _LAST_SPOOLER_CHECK < 60 and _CACHED_SPOOLER_STATUS != "unknown":
+        return _CACHED_SPOOLER_STATUS
+
     if platform.system() != "Windows":
         return "unknown"
+
     try:
-        res = subprocess.run(["sc", "query", "spooler"], capture_output=True, text=True, timeout=3)
-        if "RUNNING" in res.stdout:
-            return "running"
-        elif "STOPPED" in res.stdout:
-            return "stopped"
-        return "unknown"
+        status_val = "unknown"
+        # 1. Native pywin32 API: zero process spawning, zero console flash
+        if win32serviceutil and win32service:
+            try:
+                raw_state = win32serviceutil.QueryServiceStatus("Spooler")[1]
+                if raw_state == win32service.SERVICE_RUNNING:
+                    status_val = "running"
+                elif raw_state == win32service.SERVICE_STOPPED:
+                    status_val = "stopped"
+            except Exception:
+                pass
+
+        # 2. Fallback to sc query with flags that completely suppress CMD console window
+        if status_val == "unknown":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0x08000000
+            res = subprocess.run(
+                ["sc", "query", "spooler"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                startupinfo=startupinfo,
+                creationflags=flags
+            )
+            if "RUNNING" in res.stdout:
+                status_val = "running"
+            elif "STOPPED" in res.stdout:
+                status_val = "stopped"
+
+        _CACHED_SPOOLER_STATUS = status_val
+        _LAST_SPOOLER_CHECK = now
+        return status_val
     except Exception:
         return "unknown"
 
@@ -230,17 +274,36 @@ def print_pdf(content_base64, printer_name, orientation='portrait', color_mode=N
 
             if sumatra_path:
                 # Build settings string based on orientation and other preferences
-                settings_list = ["fit", "noscale", orientation]
+                # Smart scaling: Use noscale when paper_size is explicitly provided (thermal labels / custom presets);
+                # use shrink for standard documents so oversized pages fit without expanding small labels.
+                if paper_size:
+                    settings_list = ["noscale", orientation]
+                    settings_list.append(f"paper={paper_size}")
+                else:
+                    settings_list = ["shrink", orientation]
                 if color_mode: settings_list.append(color_mode)
                 if duplex_mode: 
                     sd_duplex = "duplexlong" if duplex_mode == "duplex" else "simplex"
                     settings_list.append(sd_duplex)
-                if paper_size: settings_list.append(f"paper={paper_size}")
                 if bin_name: settings_list.append(f"bin={bin_name}")
                 
                 settings = ",".join(settings_list)
                 logger.info(f"Executing SumatraPDF ({sumatra_path}): -print-to \"{printer_name}\" -print-settings \"{settings}\"")
-                subprocess.run([sumatra_path, "-print-to", printer_name, "-print-settings", settings, temp_path], check=True)
+                
+                startupinfo = None
+                creationflags = 0
+                if platform.system() == "Windows":
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+                    creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0x08000000
+
+                subprocess.run(
+                    [sumatra_path, "-print-to", printer_name, "-print-settings", settings, temp_path],
+                    check=True,
+                    startupinfo=startupinfo,
+                    creationflags=creationflags
+                )
                 logger.info("Job successfully sent to SumatraPDF")
             else:
                 logger.warning("SumatraPDF not found in bundle, local dir or PATH. Falling back to ShellExecute (Simple Printing).")
@@ -308,11 +371,18 @@ def check_and_notify_update(icon, latest_ver, dl_url=None):
                     )
                 except Exception as notify_err:
                     logger.warning(f"Could not display update notification: {notify_err}")
-            update_status(icon, "Online")
+            update_status(icon, "Online", force=True)
 
-def update_status(icon, message, tooltip=None):
+def update_status(icon, message, tooltip=None, force=False):
+    global CURRENT_STATUS_TEXT
+    if not force and CURRENT_STATUS_TEXT == message and not tooltip:
+        return
+    CURRENT_STATUS_TEXT = message
+
     # This might be called from background thread
     def _update():
+        if not icon:
+            return
         menu_items = [
             pystray.MenuItem("Server: " + SERVER_ID, lambda i, item: None, enabled=False),
             pystray.MenuItem("Status: " + message, lambda i, item: None, enabled=False),
@@ -433,8 +503,6 @@ def get_printer_properties(printer_name):
     except Exception as e:
         logger.error(f"ERROR scanning properties for {printer_name}: {e}")
     return {}
-
-import traceback
 
 def get_all_presets(printer_name):
     """Get ALL available presets/paper sizes/bins for a printer"""
